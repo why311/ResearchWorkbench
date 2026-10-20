@@ -2,12 +2,16 @@ import React, { useState, useEffect, useCallback, useRef, lazy, Suspense } from 
 import { createRoot } from 'react-dom/client';
 import { FlaskConical, Library, Workflow, ChartNoAxesCombined, Settings, Plus, ArrowRight, ArrowUpRight, Upload, Download, Play, FileText, Check, X, PanelLeftClose, PanelLeftOpen, BookOpen, Search, Square, GitBranch, CircleHelp, Layers, ExternalLink, Trash2, LoaderCircle, CheckCircle2, AlertCircle, Terminal, Pencil } from 'lucide-react';
 import './styles.css';
-import { api, post, type Span, type MatrixField, type Doc, type Run, type Repo, type Project, type Evidence, type Answer } from './api';
+import { api, post, type MatrixField, type Doc, type Run, type Repo, type Project, type Evidence, type Answer } from './api';
 import { AnalysisModule, SyncModule } from './ResearchModules';
 import { ResearchCockpit } from './ResearchCockpit';
 import './theme.css';
+import './library.css';
+import SourcePanel from './SourcePanel';
 
 const PaperReader = lazy(() => import('./PaperReader'));
+const DocumentStructure = lazy(() => import('./ResearchLibrary').then(m => ({ default: m.DocumentStructure })));
+const EvidenceTasks = lazy(() => import('./ResearchLibrary').then(m => ({ default: m.EvidenceTasks })));
 
 type Page = 'overview' | 'reproduce' | 'sync' | 'analysis' | 'read';
 type Status = { docker: boolean; image_ready: boolean; model_configured: boolean };
@@ -56,10 +60,10 @@ function App() {
     if (project) localStorage.setItem('research-project', project.id);
   }, [project?.id]);
   useEffect(() => {
-    if (!project || !project.runs.some(r => ['queued', 'running'].includes(r.status)) && !project.experiment_series?.some(s => ['queued', 'running'].includes(s.status))) return;
+    if (!project || !project.runs.some(r => ['queued', 'running'].includes(r.status)) && !project.experiment_series?.some(s => ['queued', 'running'].includes(s.status)) && !project.documents.some(d => d.ingestion && ['queued', 'running'].includes(d.ingestion.status))) return;
     const timer = window.setInterval(() => refresh(project.id).catch(e => setError(e.message)), 1500);
     return () => clearInterval(timer);
-  }, [project?.id, project?.runs.map(r => r.status).join(','), project?.experiment_series?.map(s => s.status).join(','), refresh]);
+  }, [project?.id, project?.runs.map(r => r.status).join(','), project?.experiment_series?.map(s => s.status).join(','), project?.documents.map(d => d.ingestion?.status).join(','), refresh]);
   useEffect(() => {
     if (!modal) return;
     const dialog = document.querySelector<HTMLDialogElement>('#app-dialog'); dialog?.showModal();
@@ -101,7 +105,7 @@ function App() {
       </main>
       <footer>研究判断由你掌握。工作台保存实际资料与运行结果。</footer>
     </div>
-    {selectedSource && <SourcePanel selected={selectedSource} close={() => setSelectedSource(null)}/>}
+    {selectedSource && <SourcePanel projectId={project!.id} selected={selectedSource} close={() => setSelectedSource(null)}/>}
     {modal && <dialog id="app-dialog" className="modal" onCancel={() => setModal(null)}><div className="modal-header"><h2>{modal === 'project' ? '新建研究项目' : '模型与运行设置'}</h2><button className="icon-button" aria-label="关闭弹窗" onClick={() => setModal(null)}><X size={20}/></button></div>
       {(error || notice) && <p className={'feedback ' + (error ? 'error' : 'success')} role={error ? 'alert' : 'status'}>{error || notice}</p>}
       {modal === 'project' ? <form onSubmit={e => { e.preventDefault(); action('create', async () => { const p = await post('/projects', { name, question }); setProjects(await api('/projects')); await refresh(p.id); setModal(null); }, '研究项目已创建'); }}>
@@ -189,7 +193,7 @@ function Reproduce({ project, busy, action, status, refreshStatus, source, goRea
 }
 
 function Read({ project, busy, action, source, modelConfigured, settings }: SharedProps & { modelConfigured: boolean; settings: () => void }) {
-  const [tab, setTab] = useState<'library' | 'matrix' | 'evidence' | 'reading'>('library');
+  const [tab, setTab] = useState<'library' | 'matrix' | 'evidence' | 'reading' | 'structure' | 'compare' | 'agent'>('library');
   const [readingDocument, setReadingDocument] = useState('');
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<any[]>([]);
@@ -199,16 +203,18 @@ function Read({ project, busy, action, source, modelConfigured, settings }: Shar
   const [draft, setDraft] = useState<Record<string, string>>({});
   const upload = (files: FileList | null) => {
     if (!files?.length) return;
-    action('upload', async () => { for (const file of Array.from(files)) { const body = new FormData(); body.append('file', file); await api(`/projects/${project.id}/documents`, { method: 'POST', body }); } }, '资料全文已导入');
+    action('upload', async () => { for (const file of Array.from(files)) { const body = new FormData(); body.append('file', file); await api(`/projects/${project.id}/${file.name.toLowerCase().endsWith('.pdf') ? 'document-ingestions' : 'documents'}`, { method: 'POST', body }); } }, '文件已接收；PDF后台解析进度见文档结构');
   };
   const cite = (citation: string) => { const separator = citation.indexOf(':'); source(citation.slice(0, separator), citation.slice(separator + 1)); };
   return <>
     <div className="page-heading"><div><h1>文献与开题</h1><p>阅读原文、比较方法，为你的研究问题整理证据。</p></div><a className="button secondary" href={`/api/projects/${project.id}/export/proposal.md`}><Download size={16}/>导出开题准备材料</a></div>
     <ProjectQuestion project={project} action={action}/>
-    <div className="tabs"><button className={tab === 'library' ? 'selected' : ''} onClick={() => setTab('library')}>文献库<span className="count">{project.documents.length}</span></button><button className={tab === 'matrix' ? 'selected' : ''} onClick={() => setTab('matrix')}>文献比较</button><button className={tab === 'evidence' ? 'selected' : ''} onClick={() => setTab('evidence')}>问题与证据</button><button className={tab === 'reading' ? 'selected' : ''} onClick={() => setTab('reading')}>论文精读</button></div>
+    <div className="tabs"><button className={tab === 'library' ? 'selected' : ''} onClick={() => setTab('library')}>文献库<span className="count">{project.documents.length}</span></button><button className={tab === 'matrix' ? 'selected' : ''} onClick={() => setTab('matrix')}>文献比较</button><button className={tab === 'evidence' ? 'selected' : ''} onClick={() => setTab('evidence')}>问题与证据</button><button className={tab === 'reading' ? 'selected' : ''} onClick={() => setTab('reading')}>论文精读</button><button className={tab === 'structure' ? 'selected' : ''} onClick={() => setTab('structure')}>文档结构</button><button className={tab === 'compare' ? 'selected' : ''} onClick={() => setTab('compare')}>证据比较</button><button className={tab === 'agent' ? 'selected' : ''} onClick={() => setTab('agent')}>研究任务</button></div>
+    {tab === 'structure' && <Suspense fallback={<p role="status">正在打开文档结构…</p>}><DocumentStructure project={project} busy={busy} action={action} source={source}/></Suspense>}
+    {(tab === 'compare' || tab === 'agent') && <Suspense fallback={<p role="status">正在打开证据工作区…</p>}><EvidenceTasks key={tab} kind={tab === 'agent' ? 'agent' : 'comparison'} project={project} busy={busy} action={action} source={source} modelConfigured={modelConfigured} settings={settings}/></Suspense>}
     {tab === 'reading' && <Suspense fallback={<div className="page-loading"><LoaderCircle className="spin"/>正在打开精读工作区…</div>}><PaperReader project={project} busy={busy} action={action} source={source} initialDocument={readingDocument} modelConfigured={modelConfigured} settings={settings}/></Suspense>}
     {tab === 'library' && <div className="library-grid"><section className="surface"><div className="section-heading"><h2>项目文献</h2><label className="button secondary file-button"><Upload size={15}/>{busy === 'upload' ? '导入中…' : '导入全文'}<input type="file" multiple accept=".pdf,.txt,.md" disabled={!!busy} onChange={e => { upload(e.target.files); e.target.value = ''; }}/></label></div>
-      {project.documents.length ? <div className="library-list">{project.documents.map(d => <article key={d.id}><button className="document-title" onClick={() => source(d.id)}><span className="file-icon"><FileText size={23}/></span><span><b>{d.title}</b><small>{d.filename} · {d.pages}页 · {d.spans.length}段原文</small></span></button><button className="button secondary read-document" onClick={() => { setReadingDocument(d.id); setTab('reading'); }}><BookOpen size={15}/>精读</button><button className="icon-button" title="移除资料" aria-label={`移除${d.title}`} disabled={!!busy} onClick={() => action('delete', () => api(`/projects/${project.id}/documents/${d.id}`, { method: 'DELETE' }), '资料已从项目移除')}><Trash2 size={16}/></button></article>)}</div> : <div className="empty upload-empty"><Library size={36}/><h3>从第一篇研究资料开始</h3><p>导入PDF、Markdown或文本，保留可回看的原文与页码。</p><label className="button primary file-button"><Upload size={16}/>选择文件<input type="file" multiple accept=".pdf,.txt,.md" disabled={!!busy} onChange={e => { upload(e.target.files); e.target.value = ''; }}/></label><span className="caption">每篇最大20MB · 扫描版PDF需先进行OCR</span><button className="text-button" disabled={!!busy} onClick={() => action('demo', () => post(`/projects/${project.id}/demo`), '示例研究说明已载入')}>先用示例资料体验<ArrowRight size={14}/></button></div>}
+      {project.documents.length ? <div className="library-list">{project.documents.map(d => <article key={d.id}><button className="document-title" onClick={() => source(d.id)}><span className="file-icon"><FileText size={23}/></span><span><b>{d.title}</b><small>{d.filename} · {d.pages}页 · {d.span_count ?? d.spans.length}段原文{d.ingestion && d.ingestion.status !== 'completed' ? ` · 解析${d.ingestion.completed}/${d.pages}页` : ''}</small></span></button><button className="button secondary read-document" onClick={() => { setReadingDocument(d.id); setTab('reading'); }}><BookOpen size={15}/>精读</button><button className="icon-button" title="移除资料" aria-label={`移除${d.title}`} disabled={!!busy} onClick={() => action('delete', () => api(`/projects/${project.id}/documents/${d.id}`, { method: 'DELETE' }), '资料已从项目移除')}><Trash2 size={16}/></button></article>)}</div> : <div className="empty upload-empty"><Library size={36}/><h3>从第一篇研究资料开始</h3><p>导入PDF、Markdown或文本，保留可回看的原文与页码。</p><label className="button primary file-button"><Upload size={16}/>选择文件<input type="file" multiple accept=".pdf,.txt,.md" disabled={!!busy} onChange={e => { upload(e.target.files); e.target.value = ''; }}/></label><span className="caption">每篇最大20MB · PDF后台解析与本机OCR</span><button className="text-button" disabled={!!busy} onClick={() => action('demo', () => post(`/projects/${project.id}/demo`), '示例研究说明已载入')}>先用示例资料体验<ArrowRight size={14}/></button></div>}
       <div className="surface-foot"><BookOpen size={16}/><span>项目文献同时可用于研复中的执行计划。</span></div>
     </section><section className="surface search-surface"><div className="section-heading"><h2>检索相关文献</h2><span className="badge neutral">Crossref</span></div><p className="muted">查找题名、作者与DOI。检索结果是题录，需另行取得并导入全文。</p><form onSubmit={e => { e.preventDefault(); action('search', async () => setResults(await api('/literature/search?q=' + encodeURIComponent(query)))); }}><div className="input-action"><input aria-label="文献关键词" value={query} onChange={e => setQuery(e.target.value)} placeholder="研究关键词或论文题名" required minLength={2}/><button className="button primary" disabled={!!busy} aria-label="检索文献">{busy === 'search' ? <LoaderCircle className="spin" size={17}/> : <Search size={17}/>}</button></div></form>{results.length ? <div className="search-results">{results.map((r, i) => <article key={i}><a href={r.url} target="_blank" rel="noreferrer">{r.title}<ExternalLink size={13}/></a><p>{r.authors}</p><small>{r.year || '年份未提供'} · {r.doi}</small></article>)}</div> : <div className="empty-text"><p>先用与你的问题直接相关的关键词检索。</p><span>题录不会自动计入全文证据。</span></div>}</section></div>}
     {tab === 'matrix' && <section className="surface"><div className="section-heading"><div><h2>把文献放在同一张表中</h2><p className="caption">提取条目保留原文定位；“未找到”不代表该论文没有对应内容。</p></div><div className="inline-actions"><a className="button secondary" href={`/api/projects/${project.id}/export/matrix.csv`}><Download size={15}/>CSV</a><button className="button primary" disabled={!!busy || !project.documents.length} onClick={() => action('matrix', () => post(`/projects/${project.id}/matrix`), '比较条目已整理，请逐项核对原文')}>{busy === 'matrix' ? <LoaderCircle className="spin" size={16}/> : <Layers size={16}/>}整理比较条目</button></div></div>
@@ -219,16 +225,6 @@ function Read({ project, busy, action, source, modelConfigured, settings }: Shar
       <section className="surface"><div className="section-heading"><h2>原文证据</h2><span className="caption">{answer?.evidence.length || 0}段</span></div>{answer?.evidence.length ? <div className="evidence-list">{answer.evidence.map((p, i) => <article key={p.citation}><div><span className="evidence-number">{i + 1}</span><button onClick={() => source(p.document_id, p.id)}>{p.title}<small>第{p.page}页 · {p.id}</small></button></div><p>{p.text}</p><button className="source-link" onClick={() => source(p.document_id, p.id)}>打开全文位置<ArrowUpRight size={12}/></button></article>)}</div> : <div className="empty compact"><BookOpen size={30}/><h3>每一段证据都可以回看</h3><p>提问后，这里显示检索到的原文和页码。</p></div>}</section>
     </div>}
   </>;
-}
-
-function SourcePanel({ selected, close }: { selected: { document: Doc; span?: string }; close: () => void }) {
-  useEffect(() => {
-    const dialog = document.querySelector<HTMLDialogElement>('#source-dialog');
-    dialog?.showModal();
-    document.getElementById('source-' + selected.span)?.scrollIntoView({ block: 'center' });
-    return () => dialog?.close();
-  }, [selected]);
-  return <dialog id="source-dialog" className="source-panel" aria-label="原文阅读面板" onCancel={close} onClick={e => { if (e.target === e.currentTarget && e.clientX < e.currentTarget.getBoundingClientRect().left) close(); }}><div className="source-header"><div><span className="small-label">原文阅读</span><h2>{selected.document.title}</h2><p>{selected.document.pages}页 · 提取文字保留页码</p></div><button className="icon-button" aria-label="关闭原文" onClick={close} autoFocus><X size={20}/></button></div><div className="source-body">{selected.document.spans.map(s => <article id={'source-' + s.id} key={s.id} className={s.id === selected.span ? 'highlighted' : ''}><span>第{s.page}页 · {s.id}</span><p>{s.text}</p></article>)}</div></dialog>;
 }
 
 createRoot(document.getElementById('root')!).render(<App/>);

@@ -24,8 +24,6 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = Path(os.environ.get('RESEARCH_DATA_DIR', ROOT / 'data')).resolve()
@@ -48,6 +46,14 @@ async def lifespan(_app):
             if child.poll() is None:
                 child.kill()
             run_update(rid, status='interrupted', finished=now())
+    with db() as conn:
+        conn.execute("UPDATE document_ingestions SET status='interrupted',error='服务停止，已解析页面保留，可继续解析',updated=? WHERE status IN ('queued','running')", (now(),))
+        conn.execute("UPDATE research_tasks SET status='interrupted',error='服务停止，已完成工具记录保留',updated=? WHERE status IN ('queued','running')", (now(),))
+    from .documents import PROCESSES as document_processes, LOCK as document_lock
+    with document_lock:
+        for child in document_processes.values():
+            if child.poll() is None:
+                child.kill()
     if shutil.which('docker'):
         for rid, _ in active:
             try:
@@ -120,6 +126,7 @@ def records(table: str, pid: str):
                 item[key] = json.loads(item[key])
         if table == 'documents':
             item['has_original'] = (DATA / 'documents' / item['id'] / ('original' + Path(item['filename']).suffix.lower())).is_file()
+            item = decorate_document(item)
         result.append(item)
     return result
 
@@ -318,20 +325,8 @@ def delete_document(pid: str, did: str):
 
 
 def search_evidence(pid: str, query: str, limit=8):
-    passages = [{'document_id': d['id'], 'title': d['title'], **s}
-                for d in records('documents', pid) for s in d['spans']]
-    if not passages:
-        return []
-    vectorizer = TfidfVectorizer(analyzer='char', ngram_range=(2, 4), max_features=30000)
-    texts = [p['text'] for p in passages]
-    try:
-        vectors = vectorizer.fit_transform(texts)
-        scores = cosine_similarity(vectorizer.transform([query]), vectors)[0]
-    except ValueError:
-        return []
-    ranked = sorted(zip(passages, scores), key=lambda pair: pair[1], reverse=True)
-    return [{**p, 'score': round(float(score), 4), 'citation': f"{p['document_id']}:{p['id']}"}
-            for p, score in ranked[:limit] if score > 0]
+    from .retrieval import retrieve
+    return retrieve(records('documents', pid), query, limit)
 
 
 class Question(BaseModel):
@@ -371,6 +366,7 @@ def build_matrix(pid: str):
     if not docs:
         raise HTTPException(400, '请先上传至少一篇资料')
     for d in docs:
+        d['spans'] = list(document_spans(d))
         row = {'mode': 'rule', 'reviewed': False}
         for key, words in MATRIX_FIELDS.items():
             found = next((s for s in d['spans'] if any(w in s['text'].lower() for w in words)), None)
@@ -730,7 +726,7 @@ def export(pid: str, kind: str):
         report += f'### {d["title"]}\n\n'
         for k, label in zip(MATRIX_FIELDS, ['方法', '数据', '指标', '局限']):
             field = d['matrix'].get(k, {})
-            span = next((s for s in d['spans'] if s['id'] == field.get('span_id')), None)
+            span = next((s for s in document_spans(d) if s['id'] == field.get('span_id')), None)
             report += f'- {label}：{field.get("text", "尚未整理")}'
             if span:
                 report += f'（{d["filename"]}，第{span["page"]}页，{span["id"]}）'
@@ -777,10 +773,14 @@ def load_demo(pid: str):
 
 from .studio import router as studio_router
 app.include_router(studio_router)
+from .documents import router as documents_router, decorate as decorate_document, spans as document_spans
+app.include_router(documents_router)
 from .research import router as research_router
 app.include_router(research_router)
 from .reading import router as reading_router
 app.include_router(reading_router)
+from .assistant import router as assistant_router
+app.include_router(assistant_router)
 
 if (ROOT / 'dist').exists():
     app.mount('/', StaticFiles(directory=ROOT / 'dist', html=True), name='frontend')

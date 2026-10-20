@@ -1,6 +1,13 @@
-export type Span = { id: string; page: number; text: string };
+export type Span = { id: string; page: number; text: string; kind?: string; bbox?: number[]; level?: number; confidence?: number; formula_candidate?: boolean };
+export type DocumentProfile = { title?: string; doi?: string; arxiv?: string; version?: number; author?: string; characters?: number; heading_count?: number; formula_candidates?: number; headings?: { text: string; page: number; span_id: string; level: number }[]; duplicates?: { document_id: string; title: string; similarity: number; suggestion: string; scope: string }[] };
+export type Ingestion = { id: string; document_id: string; status: string; completed: number; total: number; profile: DocumentProfile; error: string };
 export type MatrixField = { text: string; span_id: string | null };
-export type Doc = { id: string; title: string; filename: string; pages: number; spans: Span[]; matrix: Record<string, any>; has_original?: boolean };
+export type Doc = { id: string; title: string; filename: string; pages: number; spans: Span[]; matrix: Record<string, any>; has_original?: boolean; span_count?: number; ingestion?: Ingestion };
+export type SourcePage = { items: Span[]; page: number; pages: number; total: number; offset: number; has_more: boolean; details: { width: number; height: number; method: string; columns: number; figures: { bbox: number[] }[]; tables: { bbox: number[]; rows: (string | null)[][] }[] } | null };
+export type ComparedEvidence = Evidence & { quote?: string };
+export type ComparisonCell = { field: string; value: string; status: string; evidence: ComparedEvidence[] };
+export type Comparison = { fields: string[]; rows: { document_id: string; title: string; scope: string; cells: ComparisonCell[] }[]; warnings: string[]; mode: string; retrieval: string; limitation: string };
+export type ResearchTask = { id: string; kind: string; intent: string; status: string; mode: string; fields: string[]; document_ids: string[]; steps: { tool: string; status: string; progress?: string; arguments: Record<string, any>; output: any; started: string; finished?: string }[]; result: { note_id?: string; comparison?: Comparison; checklist?: any[]; claims?: { text: string; citation: string; quote: string; source: Evidence }[]; note?: string; evidence?: Evidence[] }; error: string; created: string; updated: string };
 export type ReadingEntry = { id: string; section: string; title: string; body: string; grade: string; span_ids: string[]; rationale: string; diagnostic: string; cost: string; note_id?: string };
 export type ReadingAnnotation = { id: string; span_id: string; quote: string; kind: string; note: string; created: string };
 export type PaperReading = { document_id: string; goal: string; entries: ReadingEntry[]; annotations: ReadingAnnotation[]; coverage: { mode: string; start_page?: number; end_page?: number; feedback_count?: number }; updated: string | null; warnings?: string[] };

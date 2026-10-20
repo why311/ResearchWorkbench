@@ -27,7 +27,7 @@ def document(pid, did):
     result = next((d for d in core.records('documents', pid) if d['id'] == did), None)
     if result is None:
         raise HTTPException(404, '当前项目没有这篇全文')
-    return result
+    return {**result, 'spans': list(core.document_spans(result))}
 
 
 def get_record(pid, did):
@@ -111,8 +111,8 @@ def save_reading(pid: str, did: str, body: ReadingBody):
 
 class GenerateBody(BaseModel):
     goal: Literal['concept', 'reproduce', 'math'] = 'reproduce'
-    start_page: int = Field(default=1, ge=1, le=300)
-    end_page: int = Field(ge=1, le=300)
+    start_page: int = Field(default=1, ge=1, le=2000)
+    end_page: int = Field(ge=1, le=2000)
 
 
 @router.post('/projects/{pid}/paper-readings/{did}/generate')

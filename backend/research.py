@@ -45,7 +45,7 @@ def resolve_note(pid, note):
     sources = []
     for ref in note['source_refs']:
         document = documents.get(ref['document_id'])
-        span = next((s for s in document['spans'] if s['id'] == ref['span_id']), None) if document else None
+        span = next((s for s in core.document_spans(document) if s['id'] == ref['span_id']), None) if document else None
         if span is None:
             raise HTTPException(422, '文献片段不属于当前项目或已失效')
         sources.append({**ref, 'title': document['title'], 'page': span['page'], 'text': span['text']})
