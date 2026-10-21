@@ -49,6 +49,7 @@ async def lifespan(_app):
     with db() as conn:
         conn.execute("UPDATE document_ingestions SET status='interrupted',error='服务停止，已解析页面保留，可继续解析',updated=? WHERE status IN ('queued','running')", (now(),))
         conn.execute("UPDATE research_tasks SET status='interrupted',error='服务停止，已完成工具记录保留',updated=? WHERE status IN ('queued','running')", (now(),))
+        conn.execute("UPDATE semantic_indexes SET status='interrupted',error='服务停止，请重新建立索引' WHERE status IN ('queued','running')")
     from .documents import PROCESSES as document_processes, LOCK as document_lock
     with document_lock:
         for child in document_processes.values():
@@ -787,6 +788,8 @@ from .assistant import router as assistant_router
 app.include_router(assistant_router)
 from .literature import router as literature_router
 app.include_router(literature_router)
+from .semantic import router as semantic_router
+app.include_router(semantic_router)
 
 if (ROOT / 'dist').exists():
     app.mount('/', StaticFiles(directory=ROOT / 'dist', html=True), name='frontend')
