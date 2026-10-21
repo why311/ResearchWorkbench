@@ -612,6 +612,19 @@ def execute_run(pid, rid, config):
             subprocess.run(['docker', 'rm', '-f', f'research-{rid}'], capture_output=True, timeout=15)
 
 
+def repository_run(pid, body):
+    repo = next((r for r in records('repositories', pid) if r['id'] == body.repository_id), None)
+    if not repo or body.entry not in repo['files'] or not body.entry.endswith('.py'):
+        raise HTTPException(422, '请选择仓库中的Python入口文件')
+    if not docker_available():
+        raise HTTPException(409, '外部仓库运行需要已启动的Docker环境')
+    if subprocess.run(['docker', 'image', 'inspect', 'research-workbench:0.1'], capture_output=True, timeout=5).returncode:
+        raise HTTPException(409, '请先准备隔离运行环境')
+    if any(len(a) > 500 for a in body.args):
+        raise HTTPException(422, '参数过长')
+    return repo
+
+
 @app.post('/api/projects/{pid}/runs')
 def start_run(pid: str, body: RunBody):
     project(pid)
@@ -619,16 +632,7 @@ def start_run(pid: str, body: RunBody):
     if body.recipe not in {'iris', 'repository'}:
         raise HTTPException(422, '未知实验类型')
     if body.recipe == 'repository':
-        repo = next((r for r in records('repositories', pid) if r['id'] == body.repository_id), None)
-        if not repo or body.entry not in repo['files'] or not body.entry.endswith('.py'):
-            raise HTTPException(422, '请选择仓库中的Python入口文件')
-        if not docker_available():
-            raise HTTPException(409, '外部仓库运行需要已启动的Docker环境')
-        if subprocess.run(['docker', 'image', 'inspect', 'research-workbench:0.1'], capture_output=True, timeout=5).returncode:
-            raise HTTPException(409, '请先准备隔离运行环境')
-        if any(len(a) > 500 for a in body.args):
-            raise HTTPException(422, '参数过长')
-        config['revision'] = repo['revision']
+        config['revision'] = repository_run(pid, body)['revision']
     rid = uid()
     with db() as conn:
         conn.execute('INSERT INTO runs VALUES (?,?,?,?,?,?,?,?,?,?)', (rid, pid, body.name, 'queued', json.dumps(config), '{}', '', '[]', now(), None))
