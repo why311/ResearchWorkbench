@@ -9,6 +9,12 @@
 - RapidOCR / rapidocr-onnxruntime：Apache-2.0，https://github.com/RapidAI/RapidOCR 。使用1.4.4发行包内的本地模型进行扫描页OCR。
 - psutil：BSD-3-Clause，https://github.com/giampaolo/psutil 。用于解析进程的实际内存监测。
 
+## 本地语义模型
+
+- FastEmbed 0.9.0：Apache-2.0，https://github.com/qdrant/fastembed 。提供本机ONNX推理。
+- sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2及Qdrant量化ONNX版本：Apache-2.0。模型来源 https://huggingface.co/Qdrant/paraphrase-multilingual-MiniLM-L12-v2-onnx-Q 。模型与分词文件保存在本机data/semantic-model，不纳入源码发布；重新分发模型时携带其完整许可。
+- 语义表示来自上游模型；本项目实现原文分句与窗口、索引任务、停止与来源定位、关键词融合及研究工作流，不把上游模型能力作为自行训练的成果。
+
 ## paper-xray
 
 来源：https://github.com/Wang-auspicious/paper-xray
