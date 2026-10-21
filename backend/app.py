@@ -781,6 +781,8 @@ from .reading import router as reading_router
 app.include_router(reading_router)
 from .assistant import router as assistant_router
 app.include_router(assistant_router)
+from .literature import router as literature_router
+app.include_router(literature_router)
 
 if (ROOT / 'dist').exists():
     app.mount('/', StaticFiles(directory=ROOT / 'dist', html=True), name='frontend')

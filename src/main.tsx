@@ -12,6 +12,8 @@ import SourcePanel from './SourcePanel';
 const PaperReader = lazy(() => import('./PaperReader'));
 const DocumentStructure = lazy(() => import('./ResearchLibrary').then(m => ({ default: m.DocumentStructure })));
 const EvidenceTasks = lazy(() => import('./ResearchLibrary').then(m => ({ default: m.EvidenceTasks })));
+const BilingualReader = lazy(() => import('./LiteratureTools').then(m => ({ default: m.BilingualReader })));
+const CitationNetwork = lazy(() => import('./LiteratureTools').then(m => ({ default: m.CitationNetwork })));
 
 type Page = 'overview' | 'reproduce' | 'sync' | 'analysis' | 'read';
 type Status = { docker: boolean; image_ready: boolean; model_configured: boolean };
@@ -193,7 +195,7 @@ function Reproduce({ project, busy, action, status, refreshStatus, source, goRea
 }
 
 function Read({ project, busy, action, source, modelConfigured, settings }: SharedProps & { modelConfigured: boolean; settings: () => void }) {
-  const [tab, setTab] = useState<'library' | 'matrix' | 'evidence' | 'reading' | 'structure' | 'compare' | 'agent'>('library');
+  const [tab, setTab] = useState<'library' | 'matrix' | 'evidence' | 'reading' | 'structure' | 'compare' | 'agent' | 'bilingual' | 'citations'>('library');
   const [readingDocument, setReadingDocument] = useState('');
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<any[]>([]);
@@ -209,7 +211,9 @@ function Read({ project, busy, action, source, modelConfigured, settings }: Shar
   return <>
     <div className="page-heading"><div><h1>文献与开题</h1><p>阅读原文、比较方法，为你的研究问题整理证据。</p></div><a className="button secondary" href={`/api/projects/${project.id}/export/proposal.md`}><Download size={16}/>导出开题准备材料</a></div>
     <ProjectQuestion project={project} action={action}/>
-    <div className="tabs"><button className={tab === 'library' ? 'selected' : ''} onClick={() => setTab('library')}>文献库<span className="count">{project.documents.length}</span></button><button className={tab === 'matrix' ? 'selected' : ''} onClick={() => setTab('matrix')}>文献比较</button><button className={tab === 'evidence' ? 'selected' : ''} onClick={() => setTab('evidence')}>问题与证据</button><button className={tab === 'reading' ? 'selected' : ''} onClick={() => setTab('reading')}>论文精读</button><button className={tab === 'structure' ? 'selected' : ''} onClick={() => setTab('structure')}>文档结构</button><button className={tab === 'compare' ? 'selected' : ''} onClick={() => setTab('compare')}>证据比较</button><button className={tab === 'agent' ? 'selected' : ''} onClick={() => setTab('agent')}>研究任务</button></div>
+    <div className="tabs"><button className={tab === 'library' ? 'selected' : ''} onClick={() => setTab('library')}>文献库<span className="count">{project.documents.length}</span></button><button className={tab === 'matrix' ? 'selected' : ''} onClick={() => setTab('matrix')}>文献比较</button><button className={tab === 'evidence' ? 'selected' : ''} onClick={() => setTab('evidence')}>问题与证据</button><button className={tab === 'reading' ? 'selected' : ''} onClick={() => setTab('reading')}>论文精读</button><button className={tab === 'structure' ? 'selected' : ''} onClick={() => setTab('structure')}>文档结构</button><button className={tab === 'compare' ? 'selected' : ''} onClick={() => setTab('compare')}>证据比较</button><button className={tab === 'agent' ? 'selected' : ''} onClick={() => setTab('agent')}>研究任务</button><button className={tab === 'bilingual' ? 'selected' : ''} onClick={() => setTab('bilingual')}>双语阅读</button><button className={tab === 'citations' ? 'selected' : ''} onClick={() => setTab('citations')}>引用关系</button></div>
+    {tab === 'bilingual' && <Suspense fallback={<p role="status">正在打开双语阅读…</p>}><BilingualReader project={project} busy={busy} action={action} source={source} modelConfigured={modelConfigured} settings={settings}/></Suspense>}
+    {tab === 'citations' && <Suspense fallback={<p role="status">正在读取引用关系…</p>}><CitationNetwork project={project} busy={busy} action={action} source={source}/></Suspense>}
     {tab === 'structure' && <Suspense fallback={<p role="status">正在打开文档结构…</p>}><DocumentStructure project={project} busy={busy} action={action} source={source}/></Suspense>}
     {(tab === 'compare' || tab === 'agent') && <Suspense fallback={<p role="status">正在打开证据工作区…</p>}><EvidenceTasks key={tab} kind={tab === 'agent' ? 'agent' : 'comparison'} project={project} busy={busy} action={action} source={source} modelConfigured={modelConfigured} settings={settings}/></Suspense>}
     {tab === 'reading' && <Suspense fallback={<div className="page-loading"><LoaderCircle className="spin"/>正在打开精读工作区…</div>}><PaperReader project={project} busy={busy} action={action} source={source} initialDocument={readingDocument} modelConfigured={modelConfigured} settings={settings}/></Suspense>}
