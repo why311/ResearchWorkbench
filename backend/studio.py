@@ -399,3 +399,18 @@ def report_export(pid: str, rid: str):
         for name in report['generated']['files']:
             archive.write(core.DATA / 'reports' / rid / report['generated']['id'] / name, name)
     return Response(buffer.getvalue(), media_type='application/zip', headers={'Content-Disposition': 'attachment; filename="research-results.zip"'})
+
+
+@router.get('/projects/{pid}/reports/{rid}/word')
+def report_word(pid: str, rid: str):
+    record = report_record(pid, rid)
+    generated = record['generated']
+    if not generated:
+        raise HTTPException(409, '请先生成成果，再导出对应版本的Word')
+    from .report_docx import export_word
+    try:
+        with PLOT_LOCK:
+            content = export_word(generated['state'], generated['version'], generated['created'])
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return Response(content, media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document', headers={'Content-Disposition': f'attachment; filename="research-report-v{generated["version"]}.docx"'})
