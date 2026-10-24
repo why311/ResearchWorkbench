@@ -59,6 +59,7 @@ def test_real_repository_series_and_isolated_replay(client, tmp_path):
 
 
 def test_repository_series_validation_keeps_project_and_argument_boundaries(client, monkeypatch):
+    monkeypatch.setattr(core, 'docker_available', lambda: False)
     pid, other = create(client), create(client)
     repo = repository(client, pid)
     value = body(repo)
