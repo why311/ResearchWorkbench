@@ -147,7 +147,7 @@ class SeriesBody(BaseModel):
         if self.base.recipe == 'repository':
             if self.factor != 'argument' or self.parameter == self.seed_parameter:
                 raise ValueError('外部仓库需选择数值参数对照，变体参数与种子参数须不同')
-            if not self.values or len(set(self.values)) != len(self.values) or any(not math.isfinite(v) for v in [self.control_value, *self.values]):
+            if not self.values or all(v == self.control_value for v in self.values) or len(set(self.values)) != len(self.values) or any(not math.isfinite(v) for v in [self.control_value, *self.values]):
                 raise ValueError('对照与变体需为有限数值，变体值不能重复')
             if len(self.base.args) > 26 or any(a.split('=', 1)[0] in {self.parameter, self.seed_parameter} for a in self.base.args):
                 raise ValueError('固定参数最多26项，不能重复设置变体或种子参数')
