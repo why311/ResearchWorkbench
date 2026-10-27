@@ -2,6 +2,7 @@
 import io
 import math
 import re
+from .report_text import body_markdown
 
 from docx import Document
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
@@ -197,6 +198,9 @@ def export_word(state, version, created):
     normal._element.get_or_add_rPr().rFonts.set(qn('w:eastAsia'), 'Microsoft YaHei')
     normal.paragraph_format.line_spacing = 1.35
     normal.paragraph_format.space_after = Pt(7)
+    title_properties = doc.styles['Title']._element.find(qn('w:pPr'))
+    for border in list(title_properties.findall(qn('w:pBdr'))) if title_properties is not None else []:
+        title_properties.remove(border)
     for name, size in [('Title', 24), ('Subtitle', 11), ('Heading 1', 17), ('Heading 2', 14), ('Heading 3', 12), ('Heading 4', 11.5)]:
         style = doc.styles[name]
         style.font.name, style.font.size = 'Calibri', Pt(size)
@@ -217,9 +221,17 @@ def export_word(state, version, created):
     field = OxmlElement('w:fldSimple'); field.set(qn('w:instr'), 'PAGE'); footer._p.append(field)
     doc.add_heading(state['title'], 0)
     doc.add_paragraph(f'成果版本：{version}  |  生成时间：{created}', 'Subtitle')
-    values = {b['alias']: b['formatted'] for b in state['bindings']}
-    rendered = re.sub(r'\{\{\s*([A-Za-z][A-Za-z0-9_]*)\s*\}\}', lambda m: values.get(m[1], '(原生成版本引用失效)'), state['template'])
+    rendered = body_markdown(state)
     markdown(doc, rendered)
+    if state.get('citations'):
+        doc.add_heading('文献原文依据', 1)
+        doc.add_paragraph('以下为作者选择的原文片段，保留来源以便核对；引用本身不表示原文支持作者的全部推断。')
+        for citation in state['citations']:
+            doc.add_heading(f'[{citation["number"]}] {citation["title"]} · 第{citation["page"]}页', 2)
+            for line in citation['text'].splitlines():
+                paragraph = doc.add_paragraph(line)
+                paragraph.paragraph_format.left_indent = Inches(.2)
+            doc.add_paragraph(f'文献编号：{citation["document_id"]}；原文片段：{citation["span_id"]}')
     if state['chart'] and state['chart_metrics']:
         import matplotlib.pyplot as plt
         from .analysis_runner import configure_plot

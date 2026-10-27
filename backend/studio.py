@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from . import app as core
 from .analysis_runner import MISSING, number, write_csv, configure_plot
+from .report_text import CITATION, body_markdown, evidence_markdown
 
 router = APIRouter(prefix='/api')
 PLOT_LOCK = threading.Lock()
@@ -240,10 +241,17 @@ class Binding(BaseModel):
     display: Literal['number', 'percent'] = 'number'
 
 
+class Citation(BaseModel):
+    alias: str = Field(pattern=r'^[A-Za-z][A-Za-z0-9_]{0,39}$')
+    document_id: str
+    span_id: str
+
+
 class ReportBody(BaseModel):
     title: str = Field(min_length=1, max_length=100)
     template: str = Field(default='', max_length=30000)
     bindings: list[Binding] = Field(default_factory=list, max_length=30)
+    citations: list[Citation] = Field(default_factory=list, max_length=30)
     chart_run_ids: list[str] = Field(default_factory=list, max_length=20)
     chart_metrics: list[str] = Field(default_factory=list, max_length=6)
 
@@ -273,7 +281,12 @@ def resolve_report(record):
     aliases = {r['alias']: r['formatted'] for r in resolved}
     referenced = set(re.findall(r'\{\{\s*([A-Za-z][A-Za-z0-9_]*)\s*\}\}', record['template']))
     errors.extend(f'文稿中的变量 {a} 尚未绑定有效结果' for a in sorted(referenced - aliases.keys()))
-    rendered = re.sub(r'\{\{\s*([A-Za-z][A-Za-z0-9_]*)\s*\}\}', lambda m: aliases.get(m[1], '(引用失效)'), record['template'])
+    citations, citation_errors = resolve_citations(record['project_id'], record['citations'])
+    errors.extend(citation_errors)
+    citation_map = {c['alias']: c for c in citations}
+    used = list(dict.fromkeys(re.findall(CITATION, record['template'])))
+    errors.extend(f'文稿中的文献引用 {a} 尚未绑定有效原文' for a in used if a not in citation_map)
+    citations = [{**citation_map[a], 'number': i + 1} for i, a in enumerate(used) if a in citation_map]
     chart = []
     for rid in record['chart_run_ids']:
         run = runs.get(rid)
@@ -286,6 +299,9 @@ def resolve_report(record):
             errors.append(f'图表指标 {metric} 没有有效来源值')
     state = {'title': record['title'], 'template': record['template'], 'bindings': resolved,
              'chart': chart, 'chart_metrics': record['chart_metrics']}
+    if citations:
+        state['citations'] = citations
+    rendered = body_markdown(state) + evidence_markdown(citations)
     previous = record['generated'].get('state')
     changes = []
     if previous:
@@ -296,6 +312,27 @@ def resolve_report(record):
                 changes.append({'alias': current['alias'], 'before': old['formatted'] if old else '未绑定', 'after': current['formatted'], 'source_changed': bool(old and old['run_id'] != current['run_id'])})
     status = 'invalid' if errors else 'new' if not previous else 'stale' if previous != state else 'synced'
     return {**record, 'preview': rendered, 'resolved': resolved, 'errors': errors, 'changes': changes, 'state': state, 'sync_status': status}
+
+
+def resolve_citations(pid, references):
+    from .documents import document, spans
+    sources, errors, cache = [], [], {}
+    for ref in references:
+        key = ref['document_id']
+        if key not in cache:
+            try:
+                doc = document(pid, key)
+                wanted = {r['span_id'] for r in references if r['document_id'] == key}
+                cache[key] = (doc, {s['id']: s for s in spans(doc) if s['id'] in wanted})
+            except HTTPException:
+                cache[key] = (None, {})
+        doc, selected = cache[key]
+        span = selected.get(ref['span_id'])
+        if not doc or not span:
+            errors.append(f'文献引用 {ref["alias"]} 的原文不存在或不属于当前项目，请重新选择')
+        else:
+            sources.append({**ref, 'title': doc['title'], 'filename': doc['filename'], 'page': span['page'], 'text': span['text']})
+    return sources, errors
 
 
 def validate_report(pid, body):
@@ -311,6 +348,11 @@ def validate_report(pid, body):
         raise HTTPException(422, '图表来源须为本项目已成功的运行')
     if len(set(body.chart_run_ids)) != len(body.chart_run_ids):
         raise HTTPException(422, '图表来源运行不能重复')
+    if len({c.alias for c in body.citations}) != len(body.citations):
+        raise HTTPException(422, '文献引用名称不能重复')
+    _, errors = resolve_citations(pid, [c.model_dump() for c in body.citations])
+    if errors:
+        raise HTTPException(422, '；'.join(errors))
 
 
 @router.post('/projects/{pid}/reports')
@@ -319,9 +361,9 @@ def create_report(pid: str, body: ReportBody):
     validate_report(pid, body)
     rid = core.uid()
     with core.db() as conn:
-        conn.execute('INSERT INTO reports VALUES (?,?,?,?,?,?,?,?,?,?)',
+        conn.execute('INSERT INTO reports (id,project_id,title,template,bindings,chart_run_ids,chart_metrics,generated,created,updated,citations) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
             (rid, pid, body.title, body.template, json.dumps([b.model_dump() for b in body.bindings]),
-             json.dumps(body.chart_run_ids), json.dumps(body.chart_metrics), '{}', core.now(), core.now()))
+             json.dumps(body.chart_run_ids), json.dumps(body.chart_metrics), '{}', core.now(), core.now(), json.dumps([c.model_dump() for c in body.citations])))
     return resolve_report(report_record(pid, rid))
 
 
@@ -330,8 +372,8 @@ def update_report(pid: str, rid: str, body: ReportBody):
     report_record(pid, rid)
     validate_report(pid, body)
     with core.db() as conn:
-        conn.execute('UPDATE reports SET title=?, template=?, bindings=?, chart_run_ids=?, chart_metrics=?, updated=? WHERE id=?',
-            (body.title, body.template, json.dumps([b.model_dump() for b in body.bindings]), json.dumps(body.chart_run_ids), json.dumps(body.chart_metrics), core.now(), rid))
+        conn.execute('UPDATE reports SET title=?, template=?, bindings=?, chart_run_ids=?, chart_metrics=?, updated=?, citations=? WHERE id=?',
+            (body.title, body.template, json.dumps([b.model_dump() for b in body.bindings]), json.dumps(body.chart_run_ids), json.dumps(body.chart_metrics), core.now(), json.dumps([c.model_dump() for c in body.citations]), rid))
     return resolve_report(report_record(pid, rid))
 
 

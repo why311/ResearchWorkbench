@@ -94,6 +94,8 @@ with db() as conn:
     CREATE TABLE IF NOT EXISTS paper_readings(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), document_id TEXT NOT NULL UNIQUE REFERENCES documents(id) ON DELETE CASCADE, goal TEXT NOT NULL, entries TEXT NOT NULL, coverage TEXT NOT NULL, updated TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS reading_annotations(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE, span_id TEXT NOT NULL, quote TEXT NOT NULL, kind TEXT NOT NULL, note TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL);
     ''')
+    if 'citations' not in {r['name'] for r in conn.execute('PRAGMA table_info(reports)')}:
+        conn.execute("ALTER TABLE reports ADD COLUMN citations TEXT NOT NULL DEFAULT '[]'")
     # A stopped server cannot keep a subprocess-backed experiment marked running.
     conn.execute("UPDATE runs SET status='interrupted', log=log || '\n服务停止，运行中断。', finished=? WHERE status IN ('queued','running')", (now(),))
     conn.execute("UPDATE experiment_series SET status='interrupted', finished=? WHERE status IN ('queued','running')", (now(),))
@@ -122,7 +124,7 @@ def records(table: str, pid: str):
     result = []
     for row in rows:
         item = dict(row)
-        for key in ('spans', 'matrix', 'files', 'config', 'metrics', 'artifacts', 'columns', 'profile', 'bindings', 'chart_run_ids', 'chart_metrics', 'generated', 'source_refs', 'run_ids', 'entries', 'coverage'):
+        for key in ('spans', 'matrix', 'files', 'config', 'metrics', 'artifacts', 'columns', 'profile', 'bindings', 'citations', 'chart_run_ids', 'chart_metrics', 'generated', 'source_refs', 'run_ids', 'entries', 'coverage'):
             if key in item:
                 item[key] = json.loads(item[key])
         if table == 'documents':
