@@ -23,11 +23,11 @@ const fields = [['method', '研究方法'], ['data', '数据与样本'], ['metri
 const statuses: Record<string, string> = { queued: '等待运行', running: '运行中', succeeded: '已完成', failed: '运行失败', timeout: '已超时', cancelled: '已取消', interrupted: '运行中断' };
 const date = (value: string) => new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
 const modules = [
-  { id: 'overview', title: '总览', desc: '研究与实验记录', icon: GitBranch },
-  { id: 'reproduce', title: '实验复现', desc: '配置与运行实验', icon: FlaskConical },
-  { id: 'sync', title: '成果同步', desc: '引用指标与导出文稿', icon: Workflow },
-  { id: 'analysis', title: '数据分析', desc: '处理数据与统计分析', icon: ChartNoAxesCombined },
-  { id: 'read', title: '文献与开题', desc: '阅读原文与整理证据', icon: Library }
+  { id: 'overview', title: '总览', icon: GitBranch },
+  { id: 'reproduce', title: '实验复现', icon: FlaskConical },
+  { id: 'sync', title: '成果同步', icon: Workflow },
+  { id: 'analysis', title: '数据分析', icon: ChartNoAxesCombined },
+  { id: 'read', title: '文献与开题', icon: Library }
 ] as const;
 
 function App() {
@@ -87,11 +87,10 @@ function App() {
 
   return <div className="app-shell">
     <aside id="workspace-navigation" className={'sidebar ' + (mobileNav ? 'open' : '')}>
-      <a className="brand" href="#" onClick={e => { e.preventDefault(); setPage('overview'); }}><span className="brand-mark"><Layers size={23} /></span><span>研舟<small>RESEARCH WORKSPACE</small></span></a>
+      <a className="brand" href="#" onClick={e => { e.preventDefault(); setPage('overview'); }}><span className="brand-mark"><Layers size={23} /></span><span>研舟</span></a>
       <div className="workspace-picker"><label htmlFor="project-picker">当前研究项目</label><select id="project-picker" value={project?.id || ''} onChange={e => refresh(e.target.value).catch(e => setError(e.message))}>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select><button className="icon-button" title="新建项目" aria-label="新建项目" onClick={() => { setName(''); setQuestion(''); setModal('project'); }}><Plus size={17}/></button></div>
-      <nav aria-label="科研功能">{modules.map(m => <button key={m.id} className={'nav-item ' + (page === m.id ? 'active' : '')} onClick={() => { setPage(m.id); setMobileNav(false); setSelectedSource(null); }}><m.icon size={19}/><span>{m.title}<small>{m.desc}</small></span>{page === m.id && <span className="nav-dot"/>}</button>)}</nav>
-      <div className="sidebar-note"><BookOpen size={17}/><p>让每个结论<br/>都有可回看的依据。</p></div>
-      <div className="sidebar-bottom"><button onClick={openSettings}><Settings size={17}/>模型与运行设置</button><div className="local-label"><span className="status-dot"/>本地工作空间<small>v0.1</small></div></div>
+      <nav aria-label="科研功能">{modules.map(m => <button key={m.id} className={'nav-item ' + (page === m.id ? 'active' : '')} onClick={() => { setPage(m.id); setMobileNav(false); setSelectedSource(null); }}><m.icon size={19}/><span>{m.title}</span>{page === m.id && <span className="nav-dot"/>}</button>)}</nav>
+      <div className="sidebar-bottom"><button onClick={openSettings}><Settings size={17}/>模型与运行设置</button></div>
     </aside>
     {mobileNav && <button className="nav-backdrop" aria-label="关闭导航" onClick={() => setMobileNav(false)}/>}
     <div className="main-shell">
@@ -106,7 +105,6 @@ function App() {
           {page === 'analysis' && <AnalysisModule key={project.id} project={project} busy={busy} action={action}/>}
         </>}
       </main>
-      <footer>研究判断由你掌握。工作台保存实际资料与运行结果。</footer>
     </div>
     {selectedSource && <SourcePanel projectId={project!.id} selected={selectedSource} close={() => setSelectedSource(null)}/>}
     {modal && <dialog id="app-dialog" className="modal" onCancel={() => setModal(null)}><div className="modal-header"><h2>{modal === 'project' ? '新建研究项目' : '模型与运行设置'}</h2><button className="icon-button" aria-label="关闭弹窗" onClick={() => setModal(null)}><X size={20}/></button></div>
@@ -163,11 +161,11 @@ function Reproduce({ project, busy, action, status, refreshStatus, source, goRea
   const compareRuns = project.runs.filter(r => comparison.includes(r.id));
   const metricKeys = [...new Set(compareRuns.flatMap(r => Object.keys(r.metrics)))];
   return <>
-    <div className="page-heading"><div><h1>实验复现</h1><p>把论文中的实验，变成可执行、可核对的研究记录。</p></div><a className="button secondary" href={`/api/projects/${project.id}/export/reproduction.zip`}><Download size={16}/>导出复现材料</a></div>
+    <div className="page-heading"><div><h1>实验复现</h1></div><a className="button secondary" href={`/api/projects/${project.id}/export/reproduction.zip`}><Download size={16}/>导出复现材料</a></div>
     <ProjectQuestion project={project} action={action}/>
     <div className="workflow-strip">{[{ title: '研究资料', detail: project.documents.length ? `${project.documents.length}篇已导入` : '等待导入', done: project.documents.length > 0 }, { title: '实验配置', detail: '选择入口与设定', done: false }, { title: '真实运行', detail: project.runs.length ? `${project.runs.length}条记录` : '尚未运行', done: project.runs.length > 0 }, { title: '结果与交付', detail: '对比 · 导出', done: project.runs.some(r => r.status === 'succeeded') }].map((s, i) => <React.Fragment key={s.title}><div className="workflow-step"><span className={'step-num ' + (s.done ? 'done' : '')}>{s.done ? <Check size={13}/> : i + 1}</span><span>{s.title}<small>{s.detail}</small></span></div>{i < 3 && <ArrowRight size={14} className="step-arrow"/>}</React.Fragment>)}</div>
     <div className="tabs"><button className={tab === 'setup' ? 'selected' : ''} onClick={() => setTab('setup')}>实验准备</button><button className={tab === 'results' ? 'selected' : ''} onClick={() => setTab('results')}>运行记录<span className="count">{project.runs.length}</span></button></div>
-    {tab === 'setup' ? <div className="reproduce-grid"><section className="surface config-surface"><div className="section-heading"><h2>配置一次实验</h2><span className="caption">所有设定随运行保存</span></div>
+    {tab === 'setup' ? <div className="reproduce-grid"><section className="surface config-surface"><div className="section-heading"><h2>配置一次实验</h2></div>
       <div className="segmented"><button className={recipe === 'iris' ? 'selected' : ''} onClick={() => setRecipe('iris')}>内置流程示例</button><button className={recipe === 'repository' ? 'selected' : ''} onClick={() => setRecipe('repository')}>我的代码仓库</button></div>
       {recipe === 'iris' ? <><div className="recipe-description"><FlaskConical size={20}/><div><b>Iris分类 · 逻辑回归</b><p>比较标准化与未标准化特征。150个真实样本，CPU运行。</p></div><span className="badge neutral">流程示例</span></div><p className="caption">此案例用于体验工作流程，不是已发表论文的复现。结果需实际运行后获得。</p>
         <label>运行名称<input value={config.name} onChange={e => setConfig({ ...config, name: e.target.value })}/></label>
@@ -211,7 +209,7 @@ function Read({ project, busy, action, source, modelConfigured, settings }: Shar
   };
   const cite = (citation: string) => { const separator = citation.indexOf(':'); source(citation.slice(0, separator), citation.slice(separator + 1)); };
   return <>
-    <div className="page-heading"><div><h1>文献与开题</h1><p>阅读原文、比较方法，为你的研究问题整理证据。</p></div><a className="button secondary" href={`/api/projects/${project.id}/export/proposal.md`}><Download size={16}/>导出开题准备材料</a></div>
+    <div className="page-heading"><div><h1>文献与开题</h1></div><a className="button secondary" href={`/api/projects/${project.id}/export/proposal.md`}><Download size={16}/>导出开题准备材料</a></div>
     <ProjectQuestion project={project} action={action}/>
     <div className="tabs"><button className={tab === 'library' ? 'selected' : ''} onClick={() => setTab('library')}>文献库<span className="count">{project.documents.length}</span></button><button className={tab === 'matrix' ? 'selected' : ''} onClick={() => setTab('matrix')}>文献比较</button><button className={tab === 'evidence' ? 'selected' : ''} onClick={() => setTab('evidence')}>问题与证据</button><button className={tab === 'reading' ? 'selected' : ''} onClick={() => setTab('reading')}>论文精读</button><button className={tab === 'structure' ? 'selected' : ''} onClick={() => setTab('structure')}>文档结构</button><button className={tab === 'compare' ? 'selected' : ''} onClick={() => setTab('compare')}>证据比较</button><button className={tab === 'agent' ? 'selected' : ''} onClick={() => setTab('agent')}>研究任务</button><button className={tab === 'bilingual' ? 'selected' : ''} onClick={() => setTab('bilingual')}>双语阅读</button><button className={tab === 'citations' ? 'selected' : ''} onClick={() => setTab('citations')}>引用关系</button></div>
     {tab === 'bilingual' && <Suspense fallback={<p role="status">正在打开双语阅读…</p>}><BilingualReader project={project} busy={busy} action={action} source={source} modelConfigured={modelConfigured} settings={settings}/></Suspense>}
