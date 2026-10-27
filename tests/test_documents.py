@@ -80,3 +80,43 @@ def test_invalid_uploads_and_origins(client):
     for origin in ('https://example.com', 'http://localhost:bad', 'null'):
         assert client.post('/api/projects', headers={'Origin': origin}, json={'name': '拒绝跨站请求'}).status_code == 403
     assert client.post('/api/projects', headers={'Origin': 'http://localhost:5178'}, json={'name': '本地开发'}).status_code == 200
+
+
+def test_annotations_persist_update_and_export(client):
+    pid = project(client)
+    root = f'/api/projects/{pid}/documents'
+    did = client.post(root, files={'file': ('notes.txt', '原文说明\n\n方法不支持因果推断。'.encode())}).json()['id']
+    path = root + '/' + did
+    ref = {'span_id': 'p1-s2', 'kind': 'confused', 'note': '需要核对研究设计。'}
+    assert client.get(path + '/annotations').json() == []
+    saved = client.put(path + '/annotations', json=ref)
+    assert saved.status_code == 200 and saved.json()['quote'] == '方法不支持因果推断。'
+    assert saved.json()['page'] == 1
+    ref.update(kind='understood', note='<script>不执行</script> 保留个人判断。')
+    assert client.put(path + '/annotations', json=ref).status_code == 200
+    notes = client.get(path + '/annotations').json()
+    assert len(notes) == 1 and notes[0]['note'] == ref['note']
+    exported = client.get(path + '/notes.md')
+    assert exported.status_code == 200 and 'reading-notes.md' in exported.headers['content-disposition']
+    assert '> 方法不支持因果推断。' in exported.text and '已理解' in exported.text
+    assert r'\<script\>' in exported.text
+    other = project(client)
+    assert client.get(f'/api/projects/{other}/documents/{did}/annotations').status_code == 404
+    assert client.put(f'/api/projects/{other}/documents/{did}/annotations', json=ref).status_code == 404
+    assert client.get(f'/api/projects/{other}/documents/{did}/notes.md').status_code == 404
+    assert client.put(path + '/annotations', json={**ref, 'span_id': 'missing'}).status_code == 422
+    assert client.put(path + '/annotations', json={**ref, 'kind': 'invented'}).status_code == 422
+    assert client.put(path + '/annotations', json={**ref, 'note': 'x' * 4001}).status_code == 422
+
+
+def test_annotation_limit_keeps_existing_notes_editable(client):
+    pid = project(client)
+    root = f'/api/projects/{pid}/documents'
+    text = '\n\n'.join(f'段落{i}' for i in range(201)).encode()
+    did = client.post(root, files={'file': ('long.txt', text)}).json()['id']
+    path = root + '/' + did
+    with core.db() as conn:
+        conn.executemany('INSERT INTO annotations VALUES (?,?,?,?,?)', [(did, f'p1-s{i}', 'highlight', '测试笔记', '2026-10-27') for i in range(1, 201)])
+    assert client.put(path + '/annotations', json={'span_id': 'p1-s201', 'note': '新笔记'}).status_code == 422
+    assert client.put(path + '/annotations', json={'span_id': 'p1-s1', 'note': '更新已有笔记'}).status_code == 200
+    assert len(client.get(path + '/annotations').json()) == 200

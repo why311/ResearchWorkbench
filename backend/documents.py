@@ -4,16 +4,20 @@ import json
 from pathlib import Path
 import re
 import uuid
+from datetime import datetime, timezone
+from typing import Literal
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pypdf import PdfReader
+from pydantic import BaseModel, Field
 
 from . import app as core
 
 router = APIRouter(prefix='/api')
 with core.db() as conn:
     conn.execute('CREATE TABLE IF NOT EXISTS documents(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),title TEXT NOT NULL,filename TEXT NOT NULL,pages INTEGER NOT NULL,spans TEXT NOT NULL)')
+    conn.execute('CREATE TABLE IF NOT EXISTS annotations(document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,span_id TEXT NOT NULL,kind TEXT NOT NULL,note TEXT NOT NULL,updated TEXT NOT NULL,PRIMARY KEY(document_id,span_id))')
 
 
 def project(pid):
@@ -101,3 +105,48 @@ def original(pid: str, did: str):
     if not path.is_file():
         raise HTTPException(404, '原文件不存在')
     return FileResponse(path, filename=doc['filename'])
+
+
+class AnnotationBody(BaseModel):
+    span_id: str
+    kind: Literal['highlight', 'confused', 'understood'] = 'highlight'
+    note: str = Field(default='', max_length=4000)
+
+
+@router.get('/projects/{pid}/documents/{did}/annotations')
+def annotations(pid: str, did: str):
+    doc = document(pid, did)
+    spans = {s['id']: s for s in json.loads(doc['spans'])}
+    with core.db() as conn:
+        rows = conn.execute('SELECT * FROM annotations WHERE document_id=? ORDER BY updated,span_id', (did,)).fetchall()
+    return [{**dict(r), 'page': spans[r['span_id']]['page'], 'quote': spans[r['span_id']]['text']} for r in rows if r['span_id'] in spans]
+
+
+@router.put('/projects/{pid}/documents/{did}/annotations')
+def save_annotation(pid: str, did: str, body: AnnotationBody):
+    doc = document(pid, did)
+    if body.span_id not in {s['id'] for s in json.loads(doc['spans'])}:
+        raise HTTPException(422, '请选择这篇资料中存在的原文段落')
+    with core.db() as conn:
+        previous = conn.execute('SELECT 1 FROM annotations WHERE document_id=? AND span_id=?', (did, body.span_id)).fetchone()
+        if not previous and conn.execute('SELECT COUNT(*) FROM annotations WHERE document_id=?', (did,)).fetchone()[0] >= 200:
+            raise HTTPException(422, '单篇最多保存200段批注，可继续编辑已有笔记')
+        conn.execute('INSERT INTO annotations VALUES (?,?,?,?,?) ON CONFLICT(document_id,span_id) DO UPDATE SET kind=excluded.kind,note=excluded.note,updated=excluded.updated',
+                     (did, body.span_id, body.kind, body.note, datetime.now(timezone.utc).isoformat()))
+    return next(a for a in annotations(pid, did) if a['span_id'] == body.span_id)
+
+
+@router.get('/projects/{pid}/documents/{did}/notes.md')
+def export_notes(pid: str, did: str):
+    doc = document(pid, did)
+    escape = lambda value: re.sub(r'([\\`*{}\[\]<>!#|_$])', r'\\\1', value)
+    content = '# ' + escape(doc['title']).replace('\n', ' ') + ' 阅读笔记\n\n原文与个人批注分别保留，理解判断由作者核对。\n'
+    kinds = {'highlight': '重点', 'confused': '待弄清', 'understood': '已理解'}
+    items = annotations(pid, did)
+    for item in items:
+        content += f'\n## 第{item["page"]}页 · {item["span_id"]} · {kinds[item["kind"]]}\n\n'
+        content += '\n'.join('> ' + escape(line) for line in item['quote'].splitlines())
+        content += '\n\n个人批注：\n\n' + '\n'.join(escape(line) for line in item['note'].splitlines()) + '\n\n保存时间：' + item['updated'] + '\n'
+    if not items:
+        content += '\n尚未保存批注。\n'
+    return Response(content, media_type='text/markdown; charset=utf-8', headers={'Content-Disposition': 'attachment; filename="reading-notes.md"'})
