@@ -120,3 +120,39 @@ def test_annotation_limit_keeps_existing_notes_editable(client):
     assert client.put(path + '/annotations', json={'span_id': 'p1-s201', 'note': '新笔记'}).status_code == 422
     assert client.put(path + '/annotations', json={'span_id': 'p1-s1', 'note': '更新已有笔记'}).status_code == 200
     assert len(client.get(path + '/annotations').json()) == 200
+
+
+def test_project_reading_queue_and_source_preservation(client):
+    pid, other = project(client), project(client)
+    root = f'/api/projects/{pid}/documents'
+    did = client.post(root, files={'file': ('研究方法.txt', '原文第一段。\n\n原文第二段。'.encode())}).json()['id']
+    client.put(root + f'/{did}/annotations', json={'span_id': 'p1-s2', 'kind': 'confused', 'note': '核对参数含义'})
+    path = f'/api/projects/{pid}/reading-questions'
+    data = client.get(path).json()
+    assert data['total'] == 1 and data['items'][0]['quote'] == '原文第二段。' and data['items'][0]['page'] == 1
+    assert client.get(path, params={'q': '参数'}).json()['total'] == 1
+    assert client.get(path, params={'q': '不存在'}).json()['total'] == 0
+    update = path + f'/{did}/p1-s2'
+    changed = client.put(update, json={'kind': 'understood', 'note': '已核对参数与原文。'})
+    assert changed.status_code == 200 and changed.json()['quote'] == '原文第二段。'
+    assert client.get(path).json()['total'] == 0
+    assert client.get(path, params={'kind': 'understood', 'document_id': did}).json()['total'] == 1
+    assert '已核对参数与原文。' in client.get(root + f'/{did}/notes.md').text
+    assert client.put(f'/api/projects/{other}/reading-questions/{did}/p1-s2', json={'kind': 'understood'}).status_code == 404
+    assert client.get(f'/api/projects/{other}/reading-questions', params={'document_id': did}).status_code == 404
+    assert client.put(path + f'/{did}/missing', json={'kind': 'understood'}).status_code == 404
+
+
+def test_queue_pagination_and_later_batch_location(client):
+    pid = project(client)
+    did = client.post(f'/api/projects/{pid}/documents', files={'file': ('long.txt', '\n\n'.join(f'原文{i}' for i in range(120)).encode())}).json()['id']
+    with core.db() as conn:
+        conn.executemany('INSERT INTO annotations VALUES (?,?,?,?,?)', [(did, f'p1-s{i}', 'confused', f'问题{i}', f'2026-10-28-{i:03}') for i in range(60, 112)])
+    path = f'/api/projects/{pid}/reading-questions'
+    first = client.get(path).json()
+    last = client.get(path, params={'offset': 50}).json()
+    assert first['total'] == 52 and len(first['items']) == 50 and first['has_more']
+    assert len(last['items']) == 2 and not last['has_more']
+    later = client.get(path, params={'q': '问题110'}).json()['items'][0]
+    assert later['offset'] == 100 and later['page'] == 1 and later['span_id'] == 'p1-s110'
+    assert client.get(path, params={'q': 'x' * 201}).status_code == 422

@@ -150,3 +150,52 @@ def export_notes(pid: str, did: str):
     if not items:
         content += '\n尚未保存批注。\n'
     return Response(content, media_type='text/markdown; charset=utf-8', headers={'Content-Disposition': 'attachment; filename="reading-notes.md"'})
+
+
+@router.get('/projects/{pid}/reading-questions')
+def reading_questions(pid: str, kind: Literal['confused', 'understood', 'all'] = 'confused', document_id: str = '', q: str = Query(default='', max_length=200), offset: int = Query(default=0, ge=0)):
+    project(pid)
+    if document_id:
+        document(pid, document_id)
+    clauses, params = ['d.project_id=?'], [pid]
+    if document_id:
+        clauses.append('a.document_id=?'); params.append(document_id)
+    if kind != 'all':
+        clauses.append('a.kind=?'); params.append(kind)
+    if q.strip():
+        clauses.append('(instr(lower(a.note),lower(?)) OR instr(lower(d.title),lower(?)))')
+        params.extend([q.strip()] * 2)
+    sql = ' FROM annotations a JOIN documents d ON d.id=a.document_id WHERE ' + ' AND '.join(clauses)
+    with core.db() as conn:
+        total = conn.execute('SELECT COUNT(*)' + sql, params).fetchone()[0]
+        rows = conn.execute('SELECT a.*,d.title' + sql + ' ORDER BY a.updated DESC,a.document_id,a.span_id LIMIT 50 OFFSET ?', [*params, offset]).fetchall()
+    items, pages = [], {}
+    for row in rows:
+        did = row['document_id']
+        if did not in pages:
+            spans = json.loads(document(pid, did)['spans'])
+            counts = {}
+            pages[did] = {}
+            for span in spans:
+                index = counts.get(span['page'], 0)
+                pages[did][span['id']] = {**span, 'offset': index // 100 * 100}
+                counts[span['page']] = index + 1
+        span = pages[did].get(row['span_id'])
+        if span:
+            items.append({**dict(row), 'id': row['span_id'], 'quote': span['text'], 'page': span['page'], 'offset': span['offset']})
+    return {'items': items, 'total': total, 'offset': offset, 'has_more': offset + len(rows) < total}
+
+
+class AnnotationEdit(BaseModel):
+    kind: Literal['highlight', 'confused', 'understood']
+    note: str = Field(default='', max_length=4000)
+
+
+@router.put('/projects/{pid}/reading-questions/{did}/{aid}')
+def edit_question(pid: str, did: str, aid: str, body: AnnotationEdit):
+    document(pid, did)
+    with core.db() as conn:
+        changed = conn.execute('UPDATE annotations SET kind=?,note=?,updated=? WHERE document_id=? AND span_id=?', (body.kind, body.note, datetime.now(timezone.utc).isoformat(), did, aid)).rowcount
+        if not changed:
+            raise HTTPException(404, '这条批注不存在')
+    return next(a for a in annotations(pid, did) if a['span_id'] == aid)
