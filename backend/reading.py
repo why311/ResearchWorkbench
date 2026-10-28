@@ -9,7 +9,7 @@ import json
 from typing import Literal
 import zipfile
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, ValidationError
 
@@ -214,6 +214,53 @@ def remove_annotation(pid: str, did: str, aid: str):
             raise HTTPException(404, '批注不存在')
         conn.execute('DELETE FROM reading_annotations WHERE id=?', (aid,))
     return dict(row)
+
+
+@router.get('/projects/{pid}/reading-questions')
+def reading_questions(pid: str, kind: Literal['confused', 'understood', 'all'] = 'confused', document_id: str = '', q: str = Query(default='', max_length=200), offset: int = Query(default=0, ge=0)):
+    core.project(pid)
+    clauses, params = ['a.project_id=?'], [pid]
+    if document_id:
+        document(pid, document_id)
+        clauses.append('a.document_id=?'); params.append(document_id)
+    if kind != 'all':
+        clauses.append('a.kind=?'); params.append(kind)
+    if q.strip():
+        clauses.append('(instr(lower(a.note),lower(?)) OR instr(lower(a.quote),lower(?)) OR instr(lower(d.title),lower(?)))')
+        params.extend([q.strip()] * 3)
+    sql = ' FROM reading_annotations a JOIN documents d ON d.id=a.document_id WHERE ' + ' AND '.join(clauses)
+    with core.db() as conn:
+        total = conn.execute('SELECT COUNT(*)' + sql, params).fetchone()[0]
+        rows = conn.execute('SELECT a.*,d.title' + sql + ' ORDER BY a.updated DESC,a.id DESC LIMIT 50 OFFSET ?', [*params, offset]).fetchall()
+        items, legacy = [], {}
+        for row in rows:
+            block = conn.execute('SELECT page FROM document_blocks WHERE document_id=? AND span_id=?', (row['document_id'], row['span_id'])).fetchone()
+            if block:
+                page = block['page']
+            else:
+                did = row['document_id']
+                if did not in legacy:
+                    data = conn.execute('SELECT spans FROM documents WHERE id=?', (did,)).fetchone()
+                    legacy[did] = {s['id']: s['page'] for s in json.loads(data['spans'])}
+                page = legacy[did].get(row['span_id'])
+            items.append({**dict(row), 'page': page, 'offset': 0})
+    return {'items': items, 'total': total, 'offset': offset, 'has_more': offset + len(items) < total}
+
+
+class AnnotationEdit(BaseModel):
+    kind: Literal['highlight', 'note', 'confused', 'verbose', 'understood']
+    note: str = Field(default='', max_length=2000)
+
+
+@router.put('/projects/{pid}/reading-questions/{did}/{aid}')
+def edit_annotation(pid: str, did: str, aid: str, body: AnnotationEdit):
+    core.project(pid)
+    with core.db() as conn:
+        changed = conn.execute('UPDATE reading_annotations SET kind=?,note=?,updated=? WHERE id=? AND document_id=? AND project_id=?',
+            (body.kind, body.note, core.now(), aid, did, pid)).rowcount
+        if not changed:
+            raise HTTPException(404, '当前项目没有这条批注')
+        return dict(conn.execute('SELECT * FROM reading_annotations WHERE id=?', (aid,)).fetchone())
 
 
 @router.post('/projects/{pid}/paper-readings/{did}/entries/{eid}/research-note')
