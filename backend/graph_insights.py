@@ -128,9 +128,18 @@ def create_outline(pid: str, body: OutlineBody):
     for index, did in enumerate(body.document_ids, 1):
         doc = document(pid, did)
         # Prefer an explicitly labeled abstract; otherwise expose the first passage as such.
-        first, chosen = None, None
+        first, chosen, after_abstract = None, None, False
         for span in spans(doc):
-            first = first or span
+            if re.fullmatch(r'\s*(?:\d+\.?\s*)?(?:abstract|摘要)\s*[:：]?\s*', span['text'], re.I):
+                after_abstract = True
+                continue
+            if span.get('kind') == 'heading':
+                after_abstract = False
+            else:
+                first = first or span
+                if after_abstract:
+                    chosen = span
+                    break
             if re.search(r'\babstract\b|摘要', span['text'], re.I):
                 chosen = span
                 break

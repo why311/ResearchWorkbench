@@ -60,3 +60,14 @@ def test_future_heading_followups_stop_at_next_heading(client):
             conn.execute('INSERT INTO document_blocks VALUES (?,?,?,?,?,?,?,?)', (doc['id'], f'p1-s{ordinal}', 1, ordinal, kind, text, '[]', '{}'))
     items = client.get(f'/api/projects/{pid}/future-work').json()['items']
     assert [s['text'] for s in items] == ['Future Work', 'A specific next experiment.']
+
+
+def test_outline_cites_abstract_content_instead_of_heading(client):
+    pid = create(client)
+    doc = core.add_document(pid, 'Structured abstract', 'structured.pdf', 1, [])
+    with core.db() as conn:
+        for ordinal, (kind, text) in enumerate([('heading', 'Paper title'), ('heading', 'Abstract'), ('text', 'Actual abstract describing the task.'), ('heading', 'Introduction')]):
+            conn.execute('INSERT INTO document_blocks VALUES (?,?,?,?,?,?,?,?)', (doc['id'], f'p1-s{ordinal}', 1, ordinal, kind, text, '[]', '{}'))
+    response = client.post(f'/api/projects/{pid}/literature-outline', json={'idea': 'A validation plan', 'document_ids': [doc['id']]})
+    assert response.status_code == 200
+    assert response.json()['citations'][0]['span_id'] == 'p1-s2'
