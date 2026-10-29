@@ -35,7 +35,10 @@ PROCESS_LOCK = threading.Lock()
 
 @asynccontextmanager
 async def lifespan(_app):
+    from .paper_watch import start_scheduler
+    watch_stop = start_scheduler()
     yield
+    watch_stop.set()
     # Stop only processes and containers created by this service instance.
     with PROCESS_LOCK:
         with db() as conn:
@@ -792,6 +795,10 @@ from .literature import router as literature_router
 app.include_router(literature_router)
 from .semantic import router as semantic_router
 app.include_router(semantic_router)
+from .graph_insights import router as graph_router
+app.include_router(graph_router)
+from .paper_watch import router as watch_router
+app.include_router(watch_router)
 
 if (ROOT / 'dist').exists():
     app.mount('/', StaticFiles(directory=ROOT / 'dist', html=True), name='frontend')

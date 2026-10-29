@@ -8,6 +8,8 @@ import { ResearchCockpit } from './ResearchCockpit';
 import './theme.css';
 import './library.css';
 import ReadingQueue from './ReadingQueue';
+const GraphInsights = lazy(() => import('./GraphInsights'));
+const PaperWatch = lazy(() => import('./PaperWatch'));
 import './reading-queue.css';
 import SourcePanel from './SourcePanel';
 
@@ -196,7 +198,7 @@ function Reproduce({ project, busy, action, status, refreshStatus, source, goRea
 }
 
 function Read({ project, busy, action, source, modelConfigured, settings }: SharedProps & { modelConfigured: boolean; settings: () => void }) {
-  const [tab, setTab] = useState<'library' | 'matrix' | 'evidence' | 'reading' | 'structure' | 'compare' | 'agent' | 'bilingual' | 'citations' | 'queue'>('library');
+  const [tab, setTab] = useState<'library' | 'matrix' | 'evidence' | 'reading' | 'structure' | 'compare' | 'agent' | 'bilingual' | 'citations' | 'queue' | 'graph' | 'watch'>('library');
   const [semanticMode, setSemanticMode] = useState(false);
   const [readingDocument, setReadingDocument] = useState('');
   const [query, setQuery] = useState('');
@@ -213,11 +215,13 @@ function Read({ project, busy, action, source, modelConfigured, settings }: Shar
   return <>
     <div className="page-heading"><div><h1>文献与开题</h1></div><a className="button secondary" href={`/api/projects/${project.id}/export/proposal.md`}><Download size={16}/>导出开题准备材料</a></div>
     <ProjectQuestion project={project} action={action}/>
-    <div className="tabs"><button className={tab === 'library' ? 'selected' : ''} onClick={() => setTab('library')}>文献库<span className="count">{project.documents.length}</span></button><button className={tab === 'matrix' ? 'selected' : ''} onClick={() => setTab('matrix')}>文献比较</button><button className={tab === 'evidence' ? 'selected' : ''} onClick={() => setTab('evidence')}>问题与证据</button><button className={tab === 'reading' ? 'selected' : ''} onClick={() => setTab('reading')}>论文精读</button><button className={tab === 'queue' ? 'selected' : ''} onClick={() => setTab('queue')}>阅读待办</button><button className={tab === 'structure' ? 'selected' : ''} onClick={() => setTab('structure')}>文档结构</button><button className={tab === 'compare' ? 'selected' : ''} onClick={() => setTab('compare')}>证据比较</button><button className={tab === 'agent' ? 'selected' : ''} onClick={() => setTab('agent')}>研究任务</button><button className={tab === 'bilingual' ? 'selected' : ''} onClick={() => setTab('bilingual')}>双语阅读</button><button className={tab === 'citations' ? 'selected' : ''} onClick={() => setTab('citations')}>引用关系</button></div>
+    <div className="tabs"><button className={tab === 'library' ? 'selected' : ''} onClick={() => setTab('library')}>文献库<span className="count">{project.documents.length}</span></button><button className={tab === 'matrix' ? 'selected' : ''} onClick={() => setTab('matrix')}>文献比较</button><button className={tab === 'evidence' ? 'selected' : ''} onClick={() => setTab('evidence')}>问题与证据</button><button className={tab === 'reading' ? 'selected' : ''} onClick={() => setTab('reading')}>论文精读</button><button className={tab === 'queue' ? 'selected' : ''} onClick={() => setTab('queue')}>阅读待办</button><button className={tab === 'structure' ? 'selected' : ''} onClick={() => setTab('structure')}>文档结构</button><button className={tab === 'compare' ? 'selected' : ''} onClick={() => setTab('compare')}>证据比较</button><button className={tab === 'agent' ? 'selected' : ''} onClick={() => setTab('agent')}>研究任务</button><button className={tab === 'bilingual' ? 'selected' : ''} onClick={() => setTab('bilingual')}>双语阅读</button><button className={tab === 'citations' ? 'selected' : ''} onClick={() => setTab('citations')}>引用关系</button><button className={tab === 'graph' ? 'selected' : ''} onClick={() => setTab('graph')}>图谱分析</button><button className={tab === 'watch' ? 'selected' : ''} onClick={() => setTab('watch')}>文献追踪</button></div>
     {tab === 'bilingual' && <Suspense fallback={<p role="status">正在打开双语阅读…</p>}><BilingualReader project={project} busy={busy} action={action} source={source} modelConfigured={modelConfigured} settings={settings}/></Suspense>}
     {tab === 'citations' && <Suspense fallback={<p role="status">正在读取引用关系…</p>}><CitationNetwork project={project} busy={busy} action={action} source={source}/></Suspense>}
     {tab === 'structure' && <Suspense fallback={<p role="status">正在打开文档结构…</p>}><DocumentStructure project={project} busy={busy} action={action} source={source}/></Suspense>}
     {(tab === 'compare' || tab === 'agent') && <Suspense fallback={<p role="status">正在打开证据工作区…</p>}><EvidenceTasks key={tab} kind={tab === 'agent' ? 'agent' : 'comparison'} project={project} busy={busy} action={action} source={source} modelConfigured={modelConfigured} settings={settings}/></Suspense>}
+    {tab === 'graph' && <Suspense fallback={<p role="status">正在打开图谱分析…</p>}><GraphInsights project={project} busy={busy} action={action} source={source}/></Suspense>}
+    {tab === 'watch' && <Suspense fallback={<p role="status">正在打开文献追踪…</p>}><PaperWatch project={project} busy={busy} action={action} source={source}/></Suspense>}
     {tab === 'queue' && <ReadingQueue projectId={project.id} documents={project.documents} source={source} noteLimit={2000}/>}
     {tab === 'reading' && <Suspense fallback={<div className="page-loading"><LoaderCircle className="spin"/>正在打开精读工作区…</div>}><PaperReader project={project} busy={busy} action={action} source={source} initialDocument={readingDocument} modelConfigured={modelConfigured} settings={settings}/></Suspense>}
     {tab === 'library' && <div className="library-grid"><section className="surface"><div className="section-heading"><h2>项目文献</h2><label className="button secondary file-button"><Upload size={15}/>{busy === 'upload' ? '导入中…' : '导入全文'}<input type="file" multiple accept=".pdf,.txt,.md" disabled={!!busy} onChange={e => { upload(e.target.files); e.target.value = ''; }}/></label></div>

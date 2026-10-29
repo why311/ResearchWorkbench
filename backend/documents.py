@@ -189,8 +189,19 @@ def parse_job(pid, jid):
         if not profile['characters']:
             raise ValueError('没有识别到文字；原文件已保留，请检查扫描清晰度或文件内容')
         with core.db() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            saved = conn.execute('SELECT profile FROM document_ingestions WHERE id=?', (jid,)).fetchone()
+            source_metadata = json.loads(saved['profile']).get('metadata_source') if saved else None
+            if source_metadata:
+                profile['parsed_title'] = profile['title']
+                profile['title'] = source_metadata['title'][:300]
+                profile['parsed_arxiv'] = profile['arxiv']
+                identifier = re.fullmatch(r'(.+?)(?:v(\d+))?', source_metadata['arxiv_id'])
+                profile['arxiv'] = identifier[1]
+                profile['version'] = int(identifier[2]) if identifier[2] else None
+                profile['metadata_source'] = source_metadata
             conn.execute('UPDATE documents SET title=? WHERE id=?', (profile['title'], doc['id']))
-        update(jid, status='completed', profile=profile)
+            conn.execute("UPDATE document_ingestions SET status='completed',profile=?,updated=? WHERE id=?", (json.dumps(profile, ensure_ascii=False), core.now(), jid))
     except Exception as exc:
         try:
             if job(pid, jid)['status'] != 'cancelled':

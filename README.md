@@ -183,7 +183,7 @@ node tests/browser-studio.cjs
 - 模型只能协助整理，学生需核对研究设定与结论。首版不自动证明新颖性、统计显著性或生成完整论文。
 - PDF后台导入支持本机OCR，每篇最大20MB、2000页；旧同步导入接口仍保留300页保护。仓库ZIP最大25MB、解压后100MB。
 - 数据表最大10MB、100000行、100列，第一行为不重复的字段名。CSV/TSV支持UTF-8与GB18030；XLSX读取第一张表，公式须先转为数值。每次最多分析12个数值字段，分组字段最多200个不同值，分组图展示前15组，完整结果保留在CSV中。
-- 数据分析当前提供描述统计与Pearson相关，不能据此自动断言因果或显著性。成果同步当前使用Markdown正文，不提供Word模板排版或自动撰写研究结论。
+- 数据分析当前提供描述统计与Pearson相关，不能据此自动断言因果或显著性。成果同步支持Markdown与通用Word导出，尚无学校模板，不自动撰写研究结论。
 - 自动多种子对照支持内置Iris与接受命令行种子/数值参数的外部Python仓库。重复随机划分可能重叠，样本标准差和配对均值不是显著性检验。最多20次运行，每次有独立时限；没有自动修改代码或无人值守生成论文。
 - 该服务仅绑定本机回环地址，尚未实现面向公网的账号系统。不要直接改为公网部署。
 - 数据、运行和模型设置位于 `data/`。源代码版本、记录主键和普通配置用于管理，没有新增hash、冻结contract、baseline或发布gate。
@@ -225,3 +225,14 @@ node tests/browser-studio.cjs
 - https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LogisticRegression.html
 - https://www.crossref.org/documentation/retrieve-metadata/rest-api/
 - https://docs.docker.com/reference/cli/docker/container/run/
+
+
+## 图谱与文献追踪
+
+在“文献与开题”的“图谱分析”中查看已确认引用的项目内PageRank、连通分量与孤立文献，导出Mermaid。展望候选保留原文页段，不自动判断新颖性或是否已解决。选取全文并填写研究想法，可将带原文引用的研究框架保存到成果同步。
+
+“文献追踪”支持arXiv关键词或编号，例如 `ti:transformer`、`arXiv:1706.03762`，可反馈兴趣并下载PDF到原有解析队列。默认关闭自动刷新；开启后仅在本机服务运行时按6—168小时间隔检查。接口限流或网络错误会显示并保留已有结果。词项相似度与GitHub链接不能证明论文价值或仓库可运行。
+
+可选配置见 [.env.example](.env.example)。此文件不会自动加载，按需在启动服务的终端设置环境变量；不设置 `RESEARCH_DATA_DIR` 时使用项目data目录，不要设为空字符串。真实模型暂不配置，以上本地流程仍可运行。维护者：[why311](https://github.com/why311)；参赛作者、学校及团队身份由本人补充。
+
+逐项验收与剩余内容见 [赛道要求对照](docs/competition-requirements.md)。
