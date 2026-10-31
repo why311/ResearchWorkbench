@@ -69,6 +69,8 @@ from .documents import router as documents_router
 app.include_router(documents_router)
 from .evidence import router as evidence_router
 app.include_router(evidence_router)
+from .reading import router as reading_router
+app.include_router(reading_router)
 
 if (ROOT / 'dist').exists():
     app.mount('/', StaticFiles(directory=ROOT / 'dist', html=True), name='frontend')
