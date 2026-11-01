@@ -4,7 +4,7 @@ import { api, post, type ModuleProps, type Span } from './api';
 import './research-discovery.css';
 
 type Node = { id: string; title: string; incoming: number; outgoing: number; pagerank: number; isolated: boolean };
-type Graph = { nodes: Node[]; edges: { source: string; target: string }[]; components: string[][]; summary: string; scope: string; excluded_references: number };
+type Graph = { candidate_edges?:{source:string;target:string}[]; nodes: Node[]; edges: { source: string; target: string }[]; components: string[][]; summary: string; scope: string; excluded_references: number };
 type Future = { items: (Span & { document_id: string; title: string; reason: string })[]; truncated: boolean; scope: string };
 
 export default function GraphInsights({ project, busy, action, source }: ModuleProps & { source: (did: string, sid?: string) => void }) {
@@ -15,6 +15,7 @@ export default function GraphInsights({ project, busy, action, source }: ModuleP
   const [selected, setSelected] = useState<string[]>([]);
   const [idea, setIdea] = useState(project.question);
   const [created, setCreated] = useState('');
+  const [matched,setMatched]=useState<any>(null);
   const base = `/projects/${project.id}`;
   useEffect(() => {
     let live = true; setError('');
@@ -28,11 +29,13 @@ export default function GraphInsights({ project, busy, action, source }: ModuleP
     setCreated(report.title);
   }, '研究框架已保存到成果同步');
   return <section className="discovery-workspace">
-    <div className="section-heading"><h2>全项目图谱分析</h2><div className="inline-actions"><button className="button secondary" disabled={!!busy} onClick={() => setRevision(n => n + 1)}><RefreshCw size={15}/>刷新分析</button><a className="button secondary" href={`/api${base}/graph-insights/mermaid`}><Download size={15}/>Mermaid脚本</a></div></div>
+    <div className="section-heading"><h2>全项目图谱分析</h2><div className="inline-actions"><button className="button secondary" disabled={!!busy||project.documents.length<2} onClick={()=>action('match-references',async()=>{setMatched(await post(base+'/reference-network/match'));setRevision(n=>n+1);})}>匹配项目内引用</button><button className="button secondary" disabled={!!busy} onClick={() => setRevision(n => n + 1)}><RefreshCw size={15}/>刷新分析</button><a className="button secondary" href={`/api${base}/graph-insights/mermaid`}><Download size={15}/>Mermaid脚本</a></div></div>
+    {matched&&<p role="status">新增{matched.created}条候选，{matched.ambiguous}处存在歧义。{matched.scope}</p>}
     {error && <p className="feedback error" role="alert">{error}</p>}
     {!graph && !error && <p role="status">正在计算项目引用关系…</p>}
+    {graph?.candidate_edges?.length? <p className="caption">虚线表示待核对引用，不参与节点排名。</p>:null}
     {graph && <><p className="discovery-summary">{graph.summary} 另有{graph.excluded_references}条候选或未关联引用未参与计算。</p>
-      <div className="graph-analysis-grid"><div className="graph-figure"><svg viewBox="0 0 500 500" role="img" aria-label="项目有向引用图，节点编号对应右侧文献表"><defs><marker id="analysis-arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0 L10 5 L0 10Z"/></marker></defs>{graph.edges.filter(e => positions.has(e.source) && positions.has(e.target)).map(e => { const a = positions.get(e.source)!, b = positions.get(e.target)!, distance = Math.hypot(b.x - a.x, b.y - a.y); return <line key={e.source + e.target} x1={a.x} y1={a.y} x2={b.x - (b.x - a.x) * 20 / distance} y2={b.y - (b.y - a.y) * 20 / distance} markerEnd="url(#analysis-arrow)"/>; })}{nodes.map((node, i) => { const p = positions.get(node.id)!; return <g key={node.id}><title>{node.title} · 项目内被引{node.incoming}篇</title><circle cx={p.x} cy={p.y} r={14 + 8 * node.pagerank / Math.max(...nodes.map(n => n.pagerank))} className={node.isolated ? 'isolated' : ''}/><text x={p.x} y={p.y + 5} textAnchor="middle">{i + 1}</text></g>; })}</svg><p className="caption">箭头指向被引全文。图中显示前30篇；下表保留全部节点和连接。</p></div>
+      <div className="graph-analysis-grid"><div className="graph-figure"><svg viewBox="0 0 500 500" role="img" aria-label="项目有向引用图，节点编号对应右侧文献表"><defs><marker id="analysis-arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0 L10 5 L0 10Z"/></marker></defs>{graph.candidate_edges?.filter(e=>positions.has(e.source)&&positions.has(e.target)).map(e=>{const a=positions.get(e.source)!,b=positions.get(e.target)!;return <line className="candidate-edge" key={'candidate-'+e.source+e.target} x1={a.x} y1={a.y} x2={b.x} y2={b.y}/>;})}{graph.edges.filter(e => positions.has(e.source) && positions.has(e.target)).map(e => { const a = positions.get(e.source)!, b = positions.get(e.target)!, distance = Math.hypot(b.x - a.x, b.y - a.y); return <line key={e.source + e.target} x1={a.x} y1={a.y} x2={b.x - (b.x - a.x) * 20 / distance} y2={b.y - (b.y - a.y) * 20 / distance} markerEnd="url(#analysis-arrow)"/>; })}{nodes.map((node, i) => { const p = positions.get(node.id)!; return <g key={node.id}><title>{node.title} · 项目内被引{node.incoming}篇</title><circle cx={p.x} cy={p.y} r={14 + 8 * node.pagerank / Math.max(...nodes.map(n => n.pagerank))} className={node.isolated ? 'isolated' : ''}/><text x={p.x} y={p.y + 5} textAnchor="middle">{i + 1}</text></g>; })}</svg><p className="caption">箭头指向被引全文。图中显示前30篇；下表保留全部节点和连接。</p></div>
       <div className="table-scroll graph-rankings"><table><thead><tr><th>文献</th><th>项目内被引</th><th>PageRank</th></tr></thead><tbody>{graph.nodes.map((node, index) => <tr key={node.id}><td><button className="text-button" onClick={() => source(node.id)}>{index + 1}. {node.title}</button><details><summary>{node.outgoing}条向外引用{node.isolated ? ' · 无已确认连接' : ''}</summary>{graph.edges.filter(e => e.source === node.id).map(e => <button className="text-button" key={e.target} onClick={() => source(e.target)}>{graph.nodes.find(n => n.id === e.target)?.title}</button>)}</details></td><td>{node.incoming}</td><td>{node.pagerank.toFixed(4)}</td></tr>)}</tbody></table></div></div>
       <p className="caption">{graph.scope}</p></>}
     <section className="discovery-section"><h2>后续研究原文</h2><p className="caption">{future?.scope}</p>{future?.truncated && <p role="status">当前展示前60段，请按文献继续核对。</p>}{future && !future.items.length && <p className="empty-text">尚未找到明确的展望词句；这不表示论文没有后续研究内容。</p>}{future?.items.map(s => <article className="future-source" key={s.document_id + s.id}><div className="section-heading"><h3>{s.title} · 第{s.page}页</h3><button className="button secondary" onClick={() => source(s.document_id, s.id)}><BookOpen size={14}/>回看原文</button></div><p>{s.text}</p></article>)}</section>

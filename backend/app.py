@@ -15,6 +15,9 @@ import threading
 import time
 import uuid
 import zipfile
+import base64
+import secrets
+from contextvars import ContextVar
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -31,6 +34,13 @@ DATA.mkdir(parents=True, exist_ok=True)
 DB = DATA / 'workbench.sqlite3'
 PROCESSES: dict[str, subprocess.Popen] = {}
 PROCESS_LOCK = threading.Lock()
+CURRENT_USER = ContextVar('research_user', default=None)
+try:
+    AUTH_USERS = json.loads(os.environ.get('RESEARCH_USERS', '{}'))
+    if not isinstance(AUTH_USERS, dict) or any(not isinstance(k, str) or not k or not isinstance(v, str) or len(v) < 16 for k, v in AUTH_USERS.items()):
+        raise ValueError()
+except (ValueError, TypeError):
+    raise ValueError('RESEARCH_USERS须为用户名到至少16字符密码的JSON对象') from None
 
 
 @asynccontextmanager
@@ -53,11 +63,14 @@ async def lifespan(_app):
         conn.execute("UPDATE document_ingestions SET status='interrupted',error='服务停止，已解析页面保留，可继续解析',updated=? WHERE status IN ('queued','running')", (now(),))
         conn.execute("UPDATE research_tasks SET status='interrupted',error='服务停止，已完成工具记录保留',updated=? WHERE status IN ('queued','running')", (now(),))
         conn.execute("UPDATE semantic_indexes SET status='interrupted',error='服务停止，请重新建立索引' WHERE status IN ('queued','running')")
-    from .documents import PROCESSES as document_processes, LOCK as document_lock
+        conn.execute("UPDATE translation_jobs SET status='interrupted',error='服务停止，可继续翻译' WHERE status IN ('queued','running')")
+    with db() as conn:
+        conn.execute("UPDATE reference_downloads SET status='interrupted',updated=? WHERE status IN ('queued','running')", (now(),))
+    from .documents import PROCESSES as document_processes, LOCK as document_lock, stop_process
     with document_lock:
         for child in document_processes.values():
             if child.poll() is None:
-                child.kill()
+                stop_process(child)
     if shutil.which('docker'):
         for rid, _ in active:
             try:
@@ -87,6 +100,7 @@ def db():
 with db() as conn:
     conn.executescript('''
     CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, name TEXT NOT NULL, question TEXT NOT NULL DEFAULT '', created TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS project_owners(project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,username TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS documents(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), title TEXT NOT NULL, filename TEXT NOT NULL, pages INTEGER NOT NULL, spans TEXT NOT NULL, matrix TEXT NOT NULL DEFAULT '{}', created TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS repositories(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), name TEXT NOT NULL, url TEXT NOT NULL, revision TEXT NOT NULL, files TEXT NOT NULL, created TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), name TEXT NOT NULL, status TEXT NOT NULL, config TEXT NOT NULL, metrics TEXT NOT NULL DEFAULT '{}', log TEXT NOT NULL DEFAULT '', artifacts TEXT NOT NULL DEFAULT '[]', created TEXT NOT NULL, finished TEXT);
@@ -107,15 +121,36 @@ with db() as conn:
 @app.middleware('http')
 async def local_origin(request: Request, call_next):
     origin = request.headers.get('origin')
-    if request.url.path.startswith('/api') and origin and origin not in {
-        'http://127.0.0.1:8787', 'http://localhost:8787', 'http://127.0.0.1:5178', 'http://localhost:5178'}:
+    allowed_origins = {'http://127.0.0.1:8787', 'http://localhost:8787', 'http://127.0.0.1:5178', 'http://localhost:5178'} | set(filter(None, os.environ.get('RESEARCH_ALLOWED_ORIGINS', '').split(',')))
+    if request.url.path.startswith('/api') and origin and origin not in allowed_origins:
         return Response('请求来源不被允许', status_code=403)
-    return await call_next(request)
+    actor = None
+    if AUTH_USERS:
+        try:
+            scheme, encoded = request.headers.get('authorization', '').split(' ', 1)
+            if scheme.lower() != 'basic': raise ValueError()
+            actor, password = base64.b64decode(encoded, validate=True).decode('utf-8').split(':', 1)
+            expected = AUTH_USERS.get(actor)
+            if expected is None or not secrets.compare_digest(password.encode(), expected.encode()): raise ValueError()
+        except (ValueError, UnicodeError):
+            return Response('请使用分配的账号登录', status_code=401, headers={'WWW-Authenticate': 'Basic realm="ResearchWorkbench", charset="UTF-8"'})
+        if request.url.path.startswith(('/api/settings', '/api/environment', '/api/runtime')) and actor != next(iter(AUTH_USERS)):
+            return Response('此操作需要服务维护者账号', status_code=403)
+    token = CURRENT_USER.set(actor)
+    try:
+        return await call_next(request)
+    finally:
+        CURRENT_USER.reset(token)
 
 
 def project(pid: str):
     with db() as conn:
         row = conn.execute('SELECT * FROM projects WHERE id=?', (pid,)).fetchone()
+        actor = CURRENT_USER.get()
+        if AUTH_USERS and actor is not None:
+            owner = conn.execute('SELECT username FROM project_owners WHERE project_id=?', (pid,)).fetchone()
+            if (owner and owner['username'] != actor) or (not owner and actor != next(iter(AUTH_USERS))):
+                row = None
     if not row:
         raise HTTPException(404, '项目不存在')
     return dict(row)
@@ -154,7 +189,7 @@ def settings():
             'api_key': saved.get('api_key', os.environ.get('RESEARCH_MODEL_KEY', ''))}
 
 
-def model_json(instruction: str, material: str):
+def model_json(instruction: str, material: str, image: bytes | None = None):
     config = settings()
     if not config['base_url'] or not config['model']:
         return None
@@ -162,19 +197,28 @@ def model_json(instruction: str, material: str):
     try:
         # Local model endpoints must not be routed through an environment HTTP proxy.
         local = re.match(r'^https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:/|$)', config['base_url'])
+        content = instruction + '\n\n资料：\n' + material
+        if image is not None:
+            import base64
+            content = [{'type': 'text', 'text': content}, {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + base64.b64encode(image).decode('ascii')}}]
+        payload = {'model': config['model'], 'temperature': 0.1, 'messages': [
+                {'role': 'system', 'content': prompt}, {'role': 'user', 'content': content}]}
+        if re.match(r'^https://api\.deepseek\.com(?:/|$)', config['base_url']):
+            payload['thinking'] = {'type': 'disabled'}
+            payload['response_format'] = {'type': 'json_object'}
         response = httpx.post(config['base_url'].rstrip('/') + '/chat/completions',
             headers={'Authorization': 'Bearer ' + config['api_key']},
-            json={'model': config['model'], 'temperature': 0.1, 'messages': [
-                {'role': 'system', 'content': prompt},
-                {'role': 'user', 'content': instruction + '\n\n资料：\n' + material}]}, timeout=90, trust_env=not bool(local))
+            json=payload, timeout=90, trust_env=not bool(local))
         response.raise_for_status()
         text = response.json()['choices'][0]['message']['content']
+        if not isinstance(text, str):
+            raise ValueError('Expected text content')
         text = re.sub(r'^```(?:json)?\s*|\s*```$', '', text.strip())
         parsed = json.loads(text)
         if not isinstance(parsed, dict):
             raise ValueError('Expected JSON object')
         return parsed
-    except (httpx.HTTPError, KeyError, ValueError) as exc:
+    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
         raise HTTPException(502, f'模型服务未返回有效结果，请检查连接和模型名称（{type(exc).__name__}）。')
 
 
@@ -206,7 +250,13 @@ def save_settings(body: ModelSettings):
         raise HTTPException(422, '模型地址需以 http:// 或 https:// 开头')
     current = settings()
     value = body.model_dump()
-    if value['base_url'] == current['base_url'] and not value['api_key']:
+    official = {'https://api.deepseek.com', 'https://api.deepseek.com/v1', 'https://api.deepseek.com/anthropic'}
+    if value['base_url'].rstrip('/') in official:
+        value['base_url'] = 'https://api.deepseek.com'
+        if re.sub(r'[\s_-]', '', value['model'].lower()) in {'v4.1flash','deepseekv4.1flash','deepseekv4flash','deepseekflash'}:
+            value['model'] = 'deepseek-flash'
+    same_service = value['base_url'] == current['base_url'] or value['base_url'] == 'https://api.deepseek.com' and current['base_url'].rstrip('/') in official
+    if same_service and not value['api_key']:
         value['api_key'] = current['api_key']
     (DATA / 'model.json').write_text(json.dumps(value), encoding='utf-8')
     return {'saved': True}
@@ -228,7 +278,16 @@ class ProjectBody(BaseModel):
 @app.get('/api/projects')
 def list_projects():
     with db() as conn:
+        actor = CURRENT_USER.get()
+        if AUTH_USERS and actor is not None:
+            return [dict(row) for row in conn.execute('SELECT p.* FROM projects p LEFT JOIN project_owners o ON o.project_id=p.id WHERE o.username=? OR (o.username IS NULL AND ?=?) ORDER BY p.created DESC', (actor, actor, next(iter(AUTH_USERS))))]
         return [dict(row) for row in conn.execute('SELECT * FROM projects ORDER BY created DESC')]
+
+
+@app.get('/api/session')
+def session():
+    actor = CURRENT_USER.get()
+    return {'username': actor or '本机用户', 'authenticated': bool(AUTH_USERS), 'administrator': not AUTH_USERS or actor == next(iter(AUTH_USERS))}
 
 
 @app.post('/api/projects')
@@ -236,6 +295,8 @@ def create_project(body: ProjectBody):
     pid = uid()
     with db() as conn:
         conn.execute('INSERT INTO projects VALUES (?,?,?,?)', (pid, body.name.strip(), body.question, now()))
+        if CURRENT_USER.get() is not None:
+            conn.execute('INSERT INTO project_owners VALUES (?,?)', (pid, CURRENT_USER.get()))
     return project(pid)
 
 
@@ -799,6 +860,18 @@ from .graph_insights import router as graph_router
 app.include_router(graph_router)
 from .paper_watch import router as watch_router
 app.include_router(watch_router)
+from .document_tools import router as document_tools_router
+app.include_router(document_tools_router)
+from .research_completion import router as completion_router
+app.include_router(completion_router)
+from .discovery import router as discovery_router
+app.include_router(discovery_router)
+
+from .streaming import router as streaming_router
+app.include_router(streaming_router)
+
+from .reference_downloads import router as download_router
+app.include_router(download_router)
 
 if (ROOT / 'dist').exists():
     app.mount('/', StaticFiles(directory=ROOT / 'dist', html=True), name='frontend')

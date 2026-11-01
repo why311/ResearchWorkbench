@@ -1,53 +1,9 @@
 import { useEffect, useState } from 'react';
-import { BookOpen, Check, Download, GitBranch, Languages, LoaderCircle, Pencil, Search, Trash2 } from 'lucide-react';
-import { api, post, type ModuleProps, type SourcePage, type Span } from './api';
+import { BookOpen, Download, GitBranch, Search, Trash2 } from 'lucide-react';
+import { api, post, type ModuleProps } from './api';
 import './literature.css';
 
 type Props = ModuleProps & { source: (did: string, sid?: string) => void };
-type Translation = { text: string; method: string; reviewed: boolean; updated: string };
-type ParallelPage = Omit<SourcePage, 'items'> & { items: (Span & { translation: Translation | null })[]; warnings?: string[] };
-
-export function BilingualReader({ project, busy, action, source, modelConfigured, settings }: Props & { modelConfigured: boolean; settings: () => void }) {
-  const [did, setDid] = useState(project.documents[0]?.id || '');
-  const doc = project.documents.find(d => d.id === did) || project.documents[0];
-  const [language, setLanguage] = useState('zh');
-  const [page, setPage] = useState(1);
-  const [offset, setOffset] = useState(0);
-  const [data, setData] = useState<ParallelPage | null>(null);
-  const [error, setError] = useState('');
-  const [reload, setReload] = useState(0);
-  const [editing, setEditing] = useState('');
-  const [text, setText] = useState('');
-  const [reviewed, setReviewed] = useState(false);
-  const base = `/projects/${project.id}/documents/${doc?.id}`;
-  const address = `${base}/translations?language=${language}&page=${page}&offset=${offset}`;
-  useEffect(() => { setPage(1); setOffset(0); }, [doc?.id]);
-  useEffect(() => {
-    let live = true; setData(null); setError('');
-    if (doc) api(address).then(v => { if (live) setData(v); }).catch(e => { if (live) setError(e.message); });
-    return () => { live = false; };
-  }, [address, reload, doc?.ingestion?.completed]);
-  const generate = () => action('translate', async () => setData(await post(base + '/translate', { language, page, offset })), '译文草稿已保存，请对照原文核对数字、符号和语义');
-  const save = () => action('translation-save', async () => {
-    await api(base + '/translations/' + editing, { method: 'PUT', body: JSON.stringify({ language, text, reviewed }) });
-    setData(await api(address)); setEditing('');
-  }, '译文与核对状态已保存');
-  if (!doc) return <div className="empty"><Languages size={32}/><h3>先导入需要对照阅读的原文</h3><p>支持逐段填写译文；配置模型后可生成草稿。</p></div>;
-  const locked = !!busy || !!editing;
-  return <section className="parallel-reader">
-    <div className="section-heading"><div><h2>双语对照阅读</h2><p className="caption">原文与译文逐段对应。模型草稿和作者核对分别标记，翻译不代替原文依据。</p></div><a className="button secondary" href={`/api${base}/translations-export?language=${language}`}><Download size={15}/>导出双语阅读包</a></div>
-    <div className="literature-toolbar"><label>当前文献<select aria-label="双语阅读文献" disabled={locked} value={doc.id} onChange={e => setDid(e.target.value)}>{project.documents.map(d => <option key={d.id} value={d.id}>{d.title}</option>)}</select></label><label>译文语言<select aria-label="译文语言" disabled={locked} value={language} onChange={e => setLanguage(e.target.value)}><option value="zh">中文</option><option value="en">English</option></select></label><label>页码<input aria-label="双语阅读页码" disabled={locked} type="number" min={1} max={doc.pages} value={page} onChange={e => { const n = Number(e.target.value); if (Number.isInteger(n) && n >= 1 && n <= doc.pages) { setPage(n); setOffset(0); } }}/></label><span>/ {doc.pages}页</span></div>
-    <div className="parallel-actions"><div className="inline-actions"><button className="button secondary" disabled={locked || !data || page <= 1 && !offset} onClick={() => { if (offset) setOffset(Math.max(0, offset - 40)); else setPage(p => p - 1); }}>上一页段</button><button className="button secondary" disabled={locked || !data || page >= doc.pages && !data.has_more} onClick={() => { if (data?.has_more) setOffset(n => n + 40); else { setOffset(0); setPage(p => p + 1); } }}>下一页段</button></div><button className="button primary" disabled={locked || !modelConfigured || !data?.items.some(s => !s.translation)} onClick={generate}>{busy === 'translate' ? <LoaderCircle size={15} className="spin"/> : <Languages size={15}/>}生成本页段缺失译文</button></div>
-    <p className="caption">{modelConfigured ? '点击生成会把本页段尚无译文的原文发送到已配置的模型服务；每批最多40段、20000字符，已有译文保留。' : <>未配置模型，仍可手动填写和导出译文。<button className="text-button" onClick={settings}>配置模型服务</button></>}{editing && ' 当前正在编辑，请保存或取消后切换文献和页码。'}</p>
-    {error && <div className="feedback error" role="alert">{error}<button onClick={() => setReload(v => v + 1)}>重试</button></div>}
-    {data?.warnings?.map(w => <p className="reading-warning" key={w}>{w}</p>)}
-    {!data && !error && <p role="status"><LoaderCircle size={16} className="spin"/>正在读取原文与译文…</p>}
-    {data && !data.items.length && <p className="empty-text">本页尚未识别到文字，请查看文档结构中的原页和解析状态。</p>}
-    {data?.items.map(span => <article className="parallel-passage" key={span.id}><div className="parallel-source"><div><h3>原文 · 第{span.page}页 · {span.id}</h3><button className="text-button" onClick={() => source(doc.id, span.id)}><BookOpen size={14}/>回看原文</button></div><p>{span.text}</p>{span.confidence !== undefined && <small>OCR文字，请核对原页</small>}</div><div className="parallel-translation"><div><h3>{language === 'zh' ? '中文译文' : 'English translation'}</h3><span className="caption">{span.translation ? `${span.translation.method === 'model' ? '模型草稿' : '人工保存'} · ${span.translation.reviewed ? '作者已核对' : '待核对'}` : '尚未填写'}</span></div>{editing === span.id ? <><label>译文<textarea aria-label="编辑译文" rows={8} maxLength={8000} value={text} onChange={e => { setText(e.target.value); setReviewed(false); }}/></label><label className="literature-check"><input type="checkbox" checked={reviewed} onChange={e => setReviewed(e.target.checked)}/>我已对照原文核对本段译文</label><div className="inline-actions"><button className="button primary" disabled={!!busy || !text.trim()} onClick={save}><Check size={14}/>保存译文</button><button className="button secondary" disabled={!!busy} onClick={() => setEditing('')}>取消</button></div></> : <><p className={span.translation ? '' : 'empty-text'}>{span.translation?.text || '填写本段译文，或配置模型后生成草稿。'}</p><button className="text-button" disabled={locked} onClick={() => { setEditing(span.id); setText(span.translation?.text || ''); setReviewed(!!span.translation?.reviewed); }}><Pencil size={13}/>{span.translation ? '修改译文' : '填写译文'}</button></>}</div></article>)}
-    {data && <p className="caption">本页共{data.total}段，当前显示第{data.items.length ? offset + 1 : 0}—{offset + data.items.length}段；导出包含本篇已保存译文及对应原文。</p>}
-  </section>;
-}
-
 type Reference = { id: string; document_id: string; span_id: string; identifier: string; label: string; quote: string; status: string; target_document_id: string | null; url: string };
 type Network = { documents: { id: string; title: string }[]; references: Reference[]; scope: string };
 

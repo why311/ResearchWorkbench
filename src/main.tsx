@@ -7,16 +7,22 @@ import { AnalysisModule, SyncModule } from './ResearchModules';
 import { ResearchCockpit } from './ResearchCockpit';
 import './theme.css';
 import './library.css';
+import './workbench.css';
 import ReadingQueue from './ReadingQueue';
 const GraphInsights = lazy(() => import('./GraphInsights'));
 const PaperWatch = lazy(() => import('./PaperWatch'));
+const DocumentWorkbench = lazy(() => import('./DocumentWorkbench'));
+const ResearchSynthesis = lazy(() => import('./ResearchSynthesis'));
+const ScholarlySearch = lazy(() => import('./ScholarlySearch'));
+const ReferenceDownloads = lazy(() => import('./ReferenceDownloads'));
 import './reading-queue.css';
 import SourcePanel from './SourcePanel';
+import StreamQuestion from './StreamQuestion';
 
 const PaperReader = lazy(() => import('./PaperReader'));
 const DocumentStructure = lazy(() => import('./ResearchLibrary').then(m => ({ default: m.DocumentStructure })));
 const EvidenceTasks = lazy(() => import('./ResearchLibrary').then(m => ({ default: m.EvidenceTasks })));
-const BilingualReader = lazy(() => import('./LiteratureTools').then(m => ({ default: m.BilingualReader })));
+const BilingualReader = lazy(() => import('./ParallelReading'));
 const SemanticSearch = lazy(() => import('./SemanticSearch'));
 const CitationNetwork = lazy(() => import('./LiteratureTools').then(m => ({ default: m.CitationNetwork })));
 
@@ -40,6 +46,7 @@ function App() {
   const [project, setProject] = useState<Project | null>(null);
   const [status, setStatus] = useState<Status>({ docker: false, image_ready: false, model_configured: false });
   const [error, setError] = useState('');
+  const [identity, setIdentity] = useState({ username:'', authenticated:false, administrator:true });
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState('');
   const [modal, setModal] = useState<'project' | 'settings' | null>(null);
@@ -56,6 +63,7 @@ function App() {
   const refreshStatus = useCallback(async () => setStatus(await api('/status')), []);
   useEffect(() => {
     (async () => {
+      setIdentity(await api('/session'));
       let list = await api('/projects');
       if (!list.length) { const p = await post('/projects', { name: '我的科研项目' }); list = [p]; }
       setProjects(list); const id = localStorage.getItem('research-project');
@@ -93,12 +101,12 @@ function App() {
     <aside id="workspace-navigation" className={'sidebar ' + (mobileNav ? 'open' : '')}>
       <a className="brand" href="#" onClick={e => { e.preventDefault(); setPage('overview'); }}><span className="brand-mark"><Layers size={23} /></span><span>研舟</span></a>
       <div className="workspace-picker"><label htmlFor="project-picker">当前研究项目</label><select id="project-picker" value={project?.id || ''} onChange={e => refresh(e.target.value).catch(e => setError(e.message))}>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select><button className="icon-button" title="新建项目" aria-label="新建项目" onClick={() => { setName(''); setQuestion(''); setModal('project'); }}><Plus size={17}/></button></div>
-      <nav aria-label="科研功能">{modules.map(m => <button key={m.id} className={'nav-item ' + (page === m.id ? 'active' : '')} onClick={() => { setPage(m.id); setMobileNav(false); setSelectedSource(null); }}><m.icon size={19}/><span>{m.title}</span>{page === m.id && <span className="nav-dot"/>}</button>)}</nav>
-      <div className="sidebar-bottom"><button onClick={openSettings}><Settings size={17}/>模型与运行设置</button></div>
+      <nav aria-label="科研功能">{modules.map(m => <button key={m.id} className={'nav-item ' + (page === m.id ? 'active' : '')} onClick={() => { setPage(m.id); setMobileNav(false); setSelectedSource(null); }}><m.icon size={19}/><span>{m.title}</span></button>)}</nav>
+      <div className="sidebar-bottom"><button disabled={!identity.administrator} onClick={openSettings}><Settings size={17}/>模型与运行设置</button></div>
     </aside>
     {mobileNav && <button className="nav-backdrop" aria-label="关闭导航" onClick={() => setMobileNav(false)}/>}
     <div className="main-shell">
-      <header className="topbar"><div><button className="mobile-toggle icon-button" aria-label="展开导航" aria-expanded={mobileNav} aria-controls="workspace-navigation" onClick={() => setMobileNav(!mobileNav)}>{mobileNav ? <PanelLeftClose size={20}/> : <PanelLeftOpen size={20}/>}</button><span className="breadcrumb">研究项目<span>/</span><b>{project?.name || '载入中'}</b></span></div><div className="topbar-right"><span className={'system-state ' + (status.model_configured ? 'ready' : '')}><span className="status-dot"/>{status.model_configured ? '模型已连接配置' : '原文检索模式'}</span><button className="icon-button" onClick={openSettings} aria-label="打开设置"><Settings size={18}/></button></div></header>
+      <header className="topbar"><div><button className="mobile-toggle icon-button" aria-label="展开导航" aria-expanded={mobileNav} aria-controls="workspace-navigation" onClick={() => setMobileNav(!mobileNav)}>{mobileNav ? <PanelLeftClose size={20}/> : <PanelLeftOpen size={20}/>}</button><span className="breadcrumb">研究项目<span>/</span><b>{project?.name || '载入中'}</b></span></div><div className="topbar-right">{identity.authenticated && <span>{identity.username}</span>}<span className={'system-state ' + (status.model_configured ? 'ready' : '')}><span className="status-dot"/>{status.model_configured ? '模型已配置' : '原文检索模式'}</span><button className="icon-button" disabled={!identity.administrator} onClick={openSettings} aria-label="打开设置"><Settings size={18}/></button></div></header>
       <main className={page === 'overview' ? 'cockpit-page' : ''}>
         {(error || notice) && <div role={error ? 'alert' : 'status'} className={'feedback ' + (error ? 'error' : 'success')}>{error ? <AlertCircle size={18}/> : <CheckCircle2 size={18}/>}<span>{error || notice}</span><button className="icon-button" aria-label="关闭提示" onClick={() => { setError(''); setNotice(''); }}><X size={16}/></button></div>}
         {!project ? <div className="page-loading"><LoaderCircle className="spin"/>正在打开工作空间…</div> : <>
@@ -115,8 +123,8 @@ function App() {
       {(error || notice) && <p className={'feedback ' + (error ? 'error' : 'success')} role={error ? 'alert' : 'status'}>{error || notice}</p>}
       {modal === 'project' ? <form onSubmit={e => { e.preventDefault(); action('create', async () => { const p = await post('/projects', { name, question }); setProjects(await api('/projects')); await refresh(p.id); setModal(null); }, '研究项目已创建'); }}>
         <label>项目名称<input autoFocus required maxLength={100} value={name} onChange={e => setName(e.target.value)} placeholder="例如：图像分类方法的复现实验"/></label><label>研究问题<textarea value={question} onChange={e => setQuestion(e.target.value)} placeholder="你希望通过资料和实验回答什么？" rows={3}/></label><div className="modal-actions"><button type="button" className="button secondary" onClick={() => setModal(null)}>取消</button><button className="button primary" disabled={!!busy}>创建项目<ArrowRight size={16}/></button></div>
-      </form> : <form onSubmit={e => { e.preventDefault(); action('settings', async () => { await api('/settings', { method: 'PUT', body: JSON.stringify(model) }); await refreshStatus(); }, '模型配置已保存'); }}>
-        <p className="muted">可连接兼容 Chat Completions 的服务。未配置时，仍可检索原文、整理资料和运行实验。</p><label>服务地址<input value={model.base_url} onChange={e => setModel({ ...model, base_url: e.target.value })} placeholder="https://api.example.com/v1"/></label><label>模型名称<input value={model.model} onChange={e => setModel({ ...model, model: e.target.value })} placeholder="服务提供方的模型名称"/></label><label>API密钥<input type="password" autoComplete="off" value={model.api_key} onChange={e => setModel({ ...model, api_key: e.target.value })} placeholder={model.has_key ? '已保存；留空保留现有密钥' : '仅保存在本机，不回传至界面'}/></label><p className="caption">模型分析会将选中的文献片段或日志发送给你配置的服务。</p>
+      </form> : <form onSubmit={e => { e.preventDefault(); action('settings', async () => { await api('/settings', { method: 'PUT', body: JSON.stringify(model) }); setModel({ ...await api('/settings'),api_key:'' }); await refreshStatus(); }, '模型配置已保存'); }}>
+        <p className="muted">可连接兼容 Chat Completions 的服务。未配置时，仍可检索原文、整理资料和运行实验。</p><button type="button" className="button secondary" onClick={()=>setModel({...model,base_url:'https://api.deepseek.com',model:'deepseek-flash'})}>使用DeepSeek Flash</button><label>服务地址<input value={model.base_url} onChange={e => setModel({ ...model, base_url: e.target.value })} placeholder="https://api.example.com/v1"/></label><label>模型名称<input value={model.model} onChange={e => setModel({ ...model, model: e.target.value })} placeholder="服务提供方的模型名称"/></label><label>API密钥<input type="password" autoComplete="off" value={model.api_key} onChange={e => setModel({ ...model, api_key: e.target.value })} placeholder={model.has_key ? '已保存；留空保留现有密钥' : '仅保存在本机，不回传至界面'}/></label><p className="caption">模型分析会将选中的文献片段或日志发送给你配置的服务。</p>
         <div className="runtime-line"><span className={'status-dot ' + (status.docker ? '' : 'offline')}/><span>Docker {status.docker ? '已启动' : '未启动'}</span><button type="button" className="text-button" onClick={() => action('runtime', async () => { await post('/runtime/prepare'); await refreshStatus(); }, '隔离环境已准备') } disabled={!!busy || !status.docker}>{busy === 'runtime' ? '正在准备环境…' : status.image_ready ? '重新准备隔离环境' : '准备隔离运行环境'}</button></div>
         <div className="modal-actions"><button type="button" className="button secondary" disabled={!!busy} onClick={() => action('testmodel', async () => { const result = await post('/settings/test'); if (!result.ok) throw new Error('模型未通过连接测试'); }, '模型连接测试成功')}>测试已保存配置</button><button className="button primary" disabled={!!busy}>保存配置<Check size={16}/></button></div>
       </form>}
@@ -198,46 +206,68 @@ function Reproduce({ project, busy, action, status, refreshStatus, source, goRea
 }
 
 function Read({ project, busy, action, source, modelConfigured, settings }: SharedProps & { modelConfigured: boolean; settings: () => void }) {
-  const [tab, setTab] = useState<'library' | 'matrix' | 'evidence' | 'reading' | 'structure' | 'compare' | 'agent' | 'bilingual' | 'citations' | 'queue' | 'graph' | 'watch'>('library');
+  const [tab, setTab] = useState<'library' | 'matrix' | 'evidence' | 'reading' | 'structure' | 'compare' | 'agent' | 'bilingual' | 'citations' | 'queue' | 'graph' | 'watch' | 'downloads' | 'organize' | 'synthesis' | 'search'>('library');
   const [semanticMode, setSemanticMode] = useState(false);
   const [readingDocument, setReadingDocument] = useState('');
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<any[]>([]);
-  const [ask, setAsk] = useState(project.question);
   const [answer, setAnswer] = useState<Answer | null>(null);
   const [editing, setEditing] = useState('');
   const [draft, setDraft] = useState<Record<string, string>>({});
-  const upload = (files: FileList | null) => {
+  const [failedUploads,setFailedUploads]=useState<{file:File;error:string}[]>([]);
+  const [uploadSummary,setUploadSummary]=useState('');
+  const upload = (files: FileList | File[] | null) => {
     if (!files?.length) return;
-    action('upload', async () => { for (const file of Array.from(files)) { const body = new FormData(); body.append('file', file); await api(`/projects/${project.id}/${file.name.toLowerCase().endsWith('.pdf') ? 'document-ingestions' : 'documents'}`, { method: 'POST', body }); } }, '文件已接收；PDF后台解析进度见文档结构');
+    const batch=Array.from(files);
+    action('upload', async () => {
+      if(batch.length>20)throw new Error('单次最多导入20份资料，请分批选择');
+      const failed:{file:File;error:string}[]=[];let succeeded=0;
+      for(const file of batch){
+        setUploadSummary(`正在接收 ${succeeded+failed.length+1}/${batch.length}：${file.name}`);
+        try{const body=new FormData();body.append('file',file);await api(`/projects/${project.id}/${file.name.toLowerCase().endsWith('.pdf')?'document-ingestions':'documents'}`,{method:'POST',body});succeeded++;}
+        catch(e){failed.push({file,error:(e as Error).message});}
+      }
+      setFailedUploads(failed);setUploadSummary(`已接收${succeeded}份，失败${failed.length}份。PDF解析进度见文档结构。`);
+    });
   };
   const cite = (citation: string) => { const separator = citation.indexOf(':'); source(citation.slice(0, separator), citation.slice(separator + 1)); };
-  return <>
+  return <div className="literature-workbench">
     <div className="page-heading"><div><h1>文献与开题</h1></div><a className="button secondary" href={`/api/projects/${project.id}/export/proposal.md`}><Download size={16}/>导出开题准备材料</a></div>
     <ProjectQuestion project={project} action={action}/>
-    <div className="tabs"><button className={tab === 'library' ? 'selected' : ''} onClick={() => setTab('library')}>文献库<span className="count">{project.documents.length}</span></button><button className={tab === 'matrix' ? 'selected' : ''} onClick={() => setTab('matrix')}>文献比较</button><button className={tab === 'evidence' ? 'selected' : ''} onClick={() => setTab('evidence')}>问题与证据</button><button className={tab === 'reading' ? 'selected' : ''} onClick={() => setTab('reading')}>论文精读</button><button className={tab === 'queue' ? 'selected' : ''} onClick={() => setTab('queue')}>阅读待办</button><button className={tab === 'structure' ? 'selected' : ''} onClick={() => setTab('structure')}>文档结构</button><button className={tab === 'compare' ? 'selected' : ''} onClick={() => setTab('compare')}>证据比较</button><button className={tab === 'agent' ? 'selected' : ''} onClick={() => setTab('agent')}>研究任务</button><button className={tab === 'bilingual' ? 'selected' : ''} onClick={() => setTab('bilingual')}>双语阅读</button><button className={tab === 'citations' ? 'selected' : ''} onClick={() => setTab('citations')}>引用关系</button><button className={tab === 'graph' ? 'selected' : ''} onClick={() => setTab('graph')}>图谱分析</button><button className={tab === 'watch' ? 'selected' : ''} onClick={() => setTab('watch')}>文献追踪</button></div>
+    <div className="literature-body"><nav className="reading-navigation" aria-label="文献工作流程">{(() => { const groups = [
+      {label:'文献管理',items:[['library','文献库'],['structure','文档结构'],['organize','文献整理']]},
+      {label:'阅读与翻译',items:[['reading','论文精读'],['bilingual','双语阅读'],['queue','阅读待办']]},
+      {label:'证据比较',items:[['matrix','文献摘要表'],['evidence','问题与证据'],['compare','逐项比较'],['agent','研究任务']]},
+      {label:'引用图谱',items:[['citations','引用关系'],['graph','图谱分析']]},
+      {label:'文献发现',items:[['search','多源检索'],['downloads','批量下载'],['watch','文献追踪']]},
+      {label:'综述与写作',items:[['synthesis','综述与方向']]}
+    ]; const current=groups.find(g=>g.items.some(([key])=>key===tab))!; return <><div className="workflow-groups">{groups.map(g=><button key={g.label} disabled={!!busy} aria-pressed={g===current} onClick={()=>setTab(g.items[0][0] as typeof tab)}>{g.label}</button>)}</div><div className="workflow-pages" aria-label={current.label}>{current.items.map(([key,label])=><button key={key} disabled={!!busy} aria-current={tab===key?'page':undefined} onClick={()=>setTab(key as typeof tab)}>{label}</button>)}</div></>; })()}</nav><div className="literature-content">
     {tab === 'bilingual' && <Suspense fallback={<p role="status">正在打开双语阅读…</p>}><BilingualReader project={project} busy={busy} action={action} source={source} modelConfigured={modelConfigured} settings={settings}/></Suspense>}
     {tab === 'citations' && <Suspense fallback={<p role="status">正在读取引用关系…</p>}><CitationNetwork project={project} busy={busy} action={action} source={source}/></Suspense>}
     {tab === 'structure' && <Suspense fallback={<p role="status">正在打开文档结构…</p>}><DocumentStructure project={project} busy={busy} action={action} source={source}/></Suspense>}
     {(tab === 'compare' || tab === 'agent') && <Suspense fallback={<p role="status">正在打开证据工作区…</p>}><EvidenceTasks key={tab} kind={tab === 'agent' ? 'agent' : 'comparison'} project={project} busy={busy} action={action} source={source} modelConfigured={modelConfigured} settings={settings}/></Suspense>}
     {tab === 'graph' && <Suspense fallback={<p role="status">正在打开图谱分析…</p>}><GraphInsights project={project} busy={busy} action={action} source={source}/></Suspense>}
+    {tab === 'downloads' && <Suspense fallback={<p role="status">正在读取下载记录…</p>}><ReferenceDownloads project={project} busy={busy} action={action}/></Suspense>}
     {tab === 'watch' && <Suspense fallback={<p role="status">正在打开文献追踪…</p>}><PaperWatch project={project} busy={busy} action={action} source={source}/></Suspense>}
+    {tab === 'synthesis' && <Suspense fallback={<p role="status">正在打开研究写作…</p>}><ResearchSynthesis project={project} busy={busy} action={action} source={source}/></Suspense>}
+    {tab === 'search' && <Suspense fallback={<p role="status">正在打开文献检索…</p>}><ScholarlySearch project={project} busy={busy} action={action}/></Suspense>}
+    {tab === 'organize' && <Suspense fallback={<p role="status">正在打开文献整理…</p>}><DocumentWorkbench project={project} busy={busy} action={action} source={source}/></Suspense>}
     {tab === 'queue' && <ReadingQueue projectId={project.id} documents={project.documents} source={source} noteLimit={2000}/>}
     {tab === 'reading' && <Suspense fallback={<div className="page-loading"><LoaderCircle className="spin"/>正在打开精读工作区…</div>}><PaperReader project={project} busy={busy} action={action} source={source} initialDocument={readingDocument} modelConfigured={modelConfigured} settings={settings}/></Suspense>}
     {tab === 'library' && <div className="library-grid"><section className="surface"><div className="section-heading"><h2>项目文献</h2><label className="button secondary file-button"><Upload size={15}/>{busy === 'upload' ? '导入中…' : '导入全文'}<input type="file" multiple accept=".pdf,.txt,.md" disabled={!!busy} onChange={e => { upload(e.target.files); e.target.value = ''; }}/></label></div>
-      {project.documents.length ? <div className="library-list">{project.documents.map(d => <article key={d.id}><button className="document-title" onClick={() => source(d.id)}><span className="file-icon"><FileText size={23}/></span><span><b>{d.title}</b><small>{d.filename} · {d.pages}页 · {d.span_count ?? d.spans.length}段原文{d.ingestion && d.ingestion.status !== 'completed' ? ` · 解析${d.ingestion.completed}/${d.pages}页` : ''}</small></span></button><button className="button secondary read-document" onClick={() => { setReadingDocument(d.id); setTab('reading'); }}><BookOpen size={15}/>精读</button><button className="icon-button" title="移除资料" aria-label={`移除${d.title}`} disabled={!!busy} onClick={() => action('delete', () => api(`/projects/${project.id}/documents/${d.id}`, { method: 'DELETE' }), '资料已从项目移除')}><Trash2 size={16}/></button></article>)}</div> : <div className="empty upload-empty"><Library size={36}/><h3>从第一篇研究资料开始</h3><p>导入PDF、Markdown或文本，保留可回看的原文与页码。</p><label className="button primary file-button"><Upload size={16}/>选择文件<input type="file" multiple accept=".pdf,.txt,.md" disabled={!!busy} onChange={e => { upload(e.target.files); e.target.value = ''; }}/></label><span className="caption">每篇最大20MB · PDF后台解析与本机OCR</span><button className="text-button" disabled={!!busy} onClick={() => action('demo', () => post(`/projects/${project.id}/demo`), '示例研究说明已载入')}>先用示例资料体验<ArrowRight size={14}/></button></div>}
+      {uploadSummary&&<div className="upload-summary"><p role="status">{uploadSummary}</p>{failedUploads.length>0&&<><ul>{failedUploads.map((item,i)=><li key={i}>{item.file.name}：{item.error}</li>)}</ul><button className="button secondary" disabled={!!busy} onClick={()=>upload(failedUploads.map(i=>i.file))}>重试失败文件</button></>}</div>}
+      {project.documents.length ? <div className="library-list">{project.documents.map(d => <article key={d.id}><button className="document-title" onClick={() => source(d.id)}><span className="file-icon"><FileText size={23}/></span><span><b>{d.title}</b><small>{d.filename} · {d.pages}页 · {d.span_count ?? d.spans.length}段原文{d.ingestion && d.ingestion.status !== 'completed' ? ` · 解析${d.ingestion.completed}/${d.pages}页` : ''}</small></span></button><button className="button secondary read-document" onClick={() => { setReadingDocument(d.id); setTab('reading'); }}><BookOpen size={15}/>精读</button><button className="icon-button" title="移除资料" aria-label={`移除${d.title}`} disabled={!!busy} onClick={() => action('delete', () => api(`/projects/${project.id}/documents/${d.id}`, { method: 'DELETE' }), '资料已从项目移除')}><Trash2 size={16}/></button></article>)}</div> : <div className="empty upload-empty"><Library size={36}/><h3>从第一篇研究资料开始</h3><p>导入PDF、Markdown或文本，保留可回看的原文与页码。</p><label className="button primary file-button"><Upload size={16}/>选择文件<input type="file" multiple accept=".pdf,.txt,.md" disabled={!!busy} onChange={e => { upload(e.target.files); e.target.value = ''; }}/></label><span className="caption">PDF最大32MB，文本最大20MB</span><button className="text-button" disabled={!!busy} onClick={() => action('demo', () => post(`/projects/${project.id}/demo`), '示例研究说明已载入')}>先用示例资料体验<ArrowRight size={14}/></button></div>}
       <div className="surface-foot"><BookOpen size={16}/><span>项目文献同时可用于实验复现中的执行计划。</span></div>
     </section><section className="surface search-surface"><div className="section-heading"><h2>检索相关文献</h2><span className="badge neutral">Crossref</span></div><p className="muted">查找题名、作者与DOI。检索结果是题录，需另行取得并导入全文。</p><form onSubmit={e => { e.preventDefault(); action('search', async () => setResults(await api('/literature/search?q=' + encodeURIComponent(query)))); }}><div className="input-action"><input aria-label="文献关键词" value={query} onChange={e => setQuery(e.target.value)} placeholder="研究关键词或论文题名" required minLength={2}/><button className="button primary" disabled={!!busy} aria-label="检索文献">{busy === 'search' ? <LoaderCircle className="spin" size={17}/> : <Search size={17}/>}</button></div></form>{results.length ? <div className="search-results">{results.map((r, i) => <article key={i}><a href={r.url} target="_blank" rel="noreferrer">{r.title}<ExternalLink size={13}/></a><p>{r.authors}</p><small>{r.year || '年份未提供'} · {r.doi}</small></article>)}</div> : <div className="empty-text"><p>先用与你的问题直接相关的关键词检索。</p><span>题录不会自动计入全文证据。</span></div>}</section></div>}
-    {tab === 'matrix' && <section className="surface"><div className="section-heading"><div><h2>把文献放在同一张表中</h2><p className="caption">提取条目保留原文定位；“未找到”不代表该论文没有对应内容。</p></div><div className="inline-actions"><a className="button secondary" href={`/api/projects/${project.id}/export/matrix.csv`}><Download size={15}/>CSV</a><button className="button primary" disabled={!!busy || !project.documents.length} onClick={() => action('matrix', () => post(`/projects/${project.id}/matrix`), '比较条目已整理，请逐项核对原文')}>{busy === 'matrix' ? <LoaderCircle className="spin" size={16}/> : <Layers size={16}/>}整理比较条目</button></div></div>
+    {tab === 'matrix' && <section className="surface"><div className="section-heading"><div><h2>文献摘要表</h2><p className="caption">提取条目保留原文定位；“未找到”不代表该论文没有对应内容。</p></div><div className="inline-actions"><a className="button secondary" href={`/api/projects/${project.id}/export/matrix.csv`}><Download size={15}/>CSV</a><button className="button primary" disabled={!!busy || !project.documents.length} onClick={() => action('matrix', () => post(`/projects/${project.id}/matrix`), '比较条目已整理，请逐项核对原文')}>{busy === 'matrix' ? <LoaderCircle className="spin" size={16}/> : <Layers size={16}/>}整理比较条目</button></div></div>
       {project.documents.length ? <div className="table-scroll matrix-scroll"><table className="matrix-table"><thead><tr><th>文献与核对状态</th>{fields.map(([key, label]) => <th key={key}>{label}</th>)}</tr></thead><tbody>{project.documents.map(d => <tr key={d.id}><td><button className="text-button doc-link" onClick={() => source(d.id)}>{d.title}</button><span className={'badge ' + (d.matrix.reviewed ? 'succeeded' : 'neutral')}>{d.matrix.reviewed ? '已人工核对' : d.matrix.mode === 'model' ? '模型提取 · 待核对' : d.matrix.mode === 'rule' ? '规则提取 · 待核对' : '尚未整理'}</span>{editing === d.id ? <div className="inline-actions"><button className="text-button" onClick={() => action('edit', async () => { await api(`/projects/${project.id}/documents/${d.id}/matrix`, { method: 'PUT', body: JSON.stringify(draft) }); setEditing(''); }, '修订已保存')}>保存核对</button><button className="text-button muted" onClick={() => setEditing('')}>取消</button></div> : <button className="text-button" onClick={() => { setEditing(d.id); setDraft(Object.fromEntries(fields.map(([key]) => [key, d.matrix[key]?.text || '未找到']))); }}><Pencil size={13}/>修订并核对</button>}</td>{fields.map(([key]) => { const field = d.matrix[key] as MatrixField | undefined; return <td key={key}>{editing === d.id ? <textarea aria-label={`${d.title}的${key}`} rows={7} value={draft[key] || ''} onChange={e => setDraft({ ...draft, [key]: e.target.value })}/> : <><p>{field?.text || '尚未整理'}</p>{field?.span_id && <button className="source-link" onClick={() => source(d.id, field.span_id!)}><BookOpen size={12}/>查看原文</button>}</>}</td>; })}</tr>)}</tbody></table></div> : <div className="empty"><Layers size={34}/><h3>先导入需要比较的文献</h3><p>可以从方法、数据、指标与局限四个维度开始。</p><button className="button secondary" onClick={() => setTab('library')}>返回文献库</button></div>}
     </section>}
     {tab === 'evidence' && <div className="inline-actions search-mode"><button className="button secondary" aria-pressed={!semanticMode} onClick={() => setSemanticMode(false)}>关键词检索与问答</button><button className="button secondary" aria-pressed={semanticMode} onClick={() => setSemanticMode(true)}>本地语义检索</button></div>}
     {tab === 'evidence' && semanticMode && <Suspense fallback={<p role="status">正在打开语义检索…</p>}><SemanticSearch project={project} busy={busy} action={action} source={source}/></Suspense>}
-    {tab === 'evidence' && !semanticMode && <div className="evidence-grid"><section className="surface"><div className="section-heading"><h2>向项目资料提问</h2><BookOpen size={18} className="muted"/></div><form onSubmit={e => { e.preventDefault(); action('evidence', async () => setAnswer(await post(`/projects/${project.id}/evidence`, { question: ask }))); }}><label>你想核对的问题<textarea rows={4} value={ask} onChange={e => setAsk(e.target.value)} placeholder="例如：资料使用了什么数据划分和评价指标？" required minLength={2}/></label><div className="ask-action"><span className="caption">仅检索当前项目已导入的全文</span><button className="button primary" disabled={!!busy || !project.documents.length}>{busy === 'evidence' ? <LoaderCircle className="spin" size={16}/> : <Search size={16}/>}查找证据</button></div></form>
-      {answer ? <div className="answer"><span className="badge neutral">{answer.mode === 'model' ? '模型整理 · 引用可回看' : '原文检索'}</span><p>{answer.answer}</p>{answer.claims.map((claim, i) => <div className="claim" key={i}><p>{claim.text}</p><div>{claim.citations.map((c, j) => <button className="source-link" key={c} onClick={() => cite(c)}><BookOpen size={12}/>依据{j + 1}</button>)}</div></div>)}</div> : <div className="empty-text"><p>问题越具体，证据越容易核对。</p><span>未配置模型时显示检索原文；配置后可生成带引用的综合说明。</span></div>}</section>
+    {tab === 'evidence' && !semanticMode && <div className="evidence-grid"><StreamQuestion key={project.id} projectId={project.id} documents={project.documents} question={project.question} disabled={!!busy||!project.documents.length} onAnswer={setAnswer} cite={cite}/>
       <section className="surface"><div className="section-heading"><h2>原文证据</h2><span className="caption">{answer?.evidence.length || 0}段</span></div>{answer?.evidence.length ? <div className="evidence-list">{answer.evidence.map((p, i) => <article key={p.citation}><div><span className="evidence-number">{i + 1}</span><button onClick={() => source(p.document_id, p.id)}>{p.title}<small>第{p.page}页 · {p.id}</small></button></div><p>{p.text}</p><button className="source-link" onClick={() => source(p.document_id, p.id)}>打开全文位置<ArrowUpRight size={12}/></button></article>)}</div> : <div className="empty compact"><BookOpen size={30}/><h3>每一段证据都可以回看</h3><p>提问后，这里显示检索到的原文和页码。</p></div>}</section>
     </div>}
-  </>;
+  </div></div></div>;
 }
 
 createRoot(document.getElementById('root')!).render(<App/>);

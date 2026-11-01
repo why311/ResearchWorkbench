@@ -1,16 +1,17 @@
 :root {
-  font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', 'PingFang SC', system-ui, sans-serif;
+  --font-ui: 'Microsoft YaHei UI', 'Microsoft YaHei', 'PingFang SC', system-ui, sans-serif;
+  font-family: var(--font-ui);
   font-size: 14px; font-synthesis: none; color: var(--ink); background: var(--canvas);
-  --ink: #18243a; --ink-secondary: #35455f; --muted: #59687e;
-  --canvas: #f3f6fb; --surface: #fff; --surface-subtle: #f7f9fc; --soft: #edf2fa;
-  --border: #dce4ef; --border-strong: #b8c7dc; --control-border: #7e8fa7; --selected: #e6edfc;
-  --accent: #2c58cc; --accent-dark: #1c409a; --focus: #4270df;
+  --ink: #20342c; --ink-secondary: #3e5148; --muted: #58685f;
+  --canvas: #f4f6f2; --surface: #fff; --surface-subtle: #f8f9f6; --soft: #eef3ed;
+  --border: #dce4da; --border-strong: #b8c8ba; --control-border: #7a8f80; --selected: #e4eee5;
+  --accent: #2b6250; --accent-dark: #214b3e; --focus: #327c65;
   --success: #267557; --success-ink: #216247; --success-soft: #e8f4ee;
   --info-ink: #244d96; --info-soft: #eaf1ff;
   --warning-ink: #875b24; --warning-soft: #faf2e5;
   --danger-ink: #a23c38; --danger-soft: #fbedeb;
-  --code-bg: #17243a; --code-ink: #e2eaf7;
-  --overlay: #17243a55; --shadow-color: #17243a25; --shadow-soft: #17243a12;
+  --code-bg: #20342c; --code-ink: #e2eaf7;
+  --overlay: #20342c55; --shadow-color: #20342c25; --shadow-soft: #20342c12;
   --radius: 10px;
 }
 body{color:var(--ink);background:var(--canvas)}

@@ -172,8 +172,9 @@ class AnalysisPlan(BaseModel):
     deduplicate: bool = False
     scales: dict[str, float] = Field(default_factory=dict)
     filters: list[RangeFilter] = Field(default_factory=list, max_length=12)
-    methods: list[Literal['summary', 'groups', 'correlation']] = Field(default=['summary'], min_length=1, max_length=3)
+    methods: list[Literal['summary', 'groups', 'correlation', 'line', 'radar', 'radar3d']] = Field(default=['summary'], min_length=1, max_length=6)
     group_by: str = ''
+    x_column: str = ''
 
 
 class AnalysisBody(BaseModel):
@@ -197,6 +198,10 @@ def start_analysis(pid: str, body: AnalysisBody):
         raise HTTPException(422, '分组字段超过200种取值，请选择分类字段或先整理分组')
     if 'correlation' in plan['methods'] and len(plan['columns']) < 2:
         raise HTTPException(422, '相关分析至少需要两个数值字段')
+    if any(m in plan['methods'] for m in ('radar', 'radar3d')) and len(plan['columns']) < 3:
+        raise HTTPException(422, '雷达图至少需要三个数值字段')
+    if plan['x_column'] and plan['x_column'] not in plan['columns']:
+        raise HTTPException(422, '折线图横轴须为已选数值字段')
     if any(c not in plan['columns'] or not math.isfinite(v) for c, v in plan['scales'].items()):
         raise HTTPException(422, '换算系数须为有限数值，并对应所选字段')
     if any(f['column'] not in plan['columns'] for f in plan['filters']):
@@ -444,7 +449,7 @@ def report_export(pid: str, rid: str):
 
 
 @router.get('/projects/{pid}/reports/{rid}/word')
-def report_word(pid: str, rid: str):
+def report_word(pid: str, rid: str, template: Literal['generic','school'] = 'generic'):
     record = report_record(pid, rid)
     generated = record['generated']
     if not generated:
@@ -452,7 +457,10 @@ def report_word(pid: str, rid: str):
     from .report_docx import export_word
     try:
         with PLOT_LOCK:
-            content = export_word(generated['state'], generated['version'], generated['created'])
+            template_path = core.DATA / 'templates' / 'school.docx' if template == 'school' else None
+            if template_path and not template_path.is_file():
+                raise HTTPException(409, '本机尚未安装学校模板')
+            content = export_word(generated['state'], generated['version'], generated['created'], template_path)
     except (ValueError, TypeError) as exc:
         raise HTTPException(422, str(exc)) from exc
     return Response(content, media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document', headers={'Content-Disposition': f'attachment; filename="research-report-v{generated["version"]}.docx"'})

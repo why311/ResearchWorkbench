@@ -6,6 +6,8 @@ import re
 from typing import Literal
 from urllib.parse import quote
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
@@ -15,11 +17,16 @@ from . import app as core
 from .documents import document, get_spans, spans
 
 router = APIRouter(prefix='/api')
+TRANSLATION_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix='translation')
+TRANSLATION_FUTURES = {}
+TRANSLATION_LOCK = Lock()
 with core.db() as conn:
     conn.executescript('''
     CREATE TABLE IF NOT EXISTS translations(document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,span_id TEXT NOT NULL,language TEXT NOT NULL,text TEXT NOT NULL,method TEXT NOT NULL,reviewed INTEGER NOT NULL,updated TEXT NOT NULL,PRIMARY KEY(document_id,span_id,language));
     CREATE TABLE IF NOT EXISTS literature_references(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,span_id TEXT NOT NULL,identifier TEXT NOT NULL,label TEXT NOT NULL,quote TEXT NOT NULL,status TEXT NOT NULL,target_document_id TEXT REFERENCES documents(id) ON DELETE SET NULL,created TEXT NOT NULL,updated TEXT NOT NULL,UNIQUE(document_id,identifier));
     ''')
+    conn.execute("CREATE TABLE IF NOT EXISTS translation_jobs(document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,language TEXT NOT NULL,status TEXT NOT NULL,start_page INTEGER NOT NULL,end_page INTEGER NOT NULL,completed INTEGER NOT NULL,total INTEGER NOT NULL,error TEXT NOT NULL,updated TEXT NOT NULL,PRIMARY KEY(document_id,language))")
+    conn.execute("UPDATE translation_jobs SET status='interrupted',error='服务停止，可继续翻译' WHERE status IN ('queued','running')")
 
 
 def passage(pid, did, sid):
@@ -59,6 +66,88 @@ class TranslateBody(BaseModel):
     language: Literal['zh', 'en'] = 'zh'
     page: int = Field(default=1, ge=1, le=2000)
     offset: int = Field(default=0, ge=0)
+
+
+class FullTranslateBody(BaseModel):
+    language: Literal['zh', 'en'] = 'zh'
+    start_page: int = Field(default=1, ge=1, le=2000)
+    end_page: int = Field(ge=1, le=2000)
+
+
+@router.get('/projects/{pid}/documents/{did}/translation-job')
+def translation_job(pid: str, did: str, language: Literal['zh', 'en'] = 'zh'):
+    document(pid, did)
+    with core.db() as conn:
+        row = conn.execute('SELECT * FROM translation_jobs WHERE document_id=? AND language=?', (did, language)).fetchone()
+    return dict(row) if row else None
+
+
+def run_translation(pid, did, body):
+    try:
+        with core.db() as conn:
+            conn.execute("UPDATE translation_jobs SET status='running' WHERE document_id=? AND language=? AND status='queued'", (did, body.language))
+        completed = 0
+        for page in range(body.start_page, body.end_page + 1):
+            offset = 0
+            while True:
+                if translation_job(pid, did, body.language)['status'] != 'running':
+                    return
+                data = translations(pid, did, body.language, page, offset)
+                if any(not s['translation'] for s in data['items']):
+                    # Bound each batch to the existing API and preserve every manually saved translation.
+                    translated = generate_translation(pid, did, TranslateBody(language=body.language, page=page, offset=offset))
+                    if any(not s['translation'] for s in translated['items']):
+                        raise HTTPException(502, '部分片段未通过译文对应检查，已有译文保留，可继续补齐')
+                completed += len(data['items'])
+                with core.db() as conn:
+                    conn.execute('UPDATE translation_jobs SET completed=?,updated=? WHERE document_id=? AND language=?', (completed, core.now(), did, body.language))
+                if not data['has_more']:
+                    break
+                offset += 40
+        with core.db() as conn:
+            conn.execute("UPDATE translation_jobs SET status='completed',updated=? WHERE document_id=? AND language=? AND status='running'", (core.now(), did, body.language))
+    except Exception as exc:
+        message = str(exc.detail) if isinstance(exc, HTTPException) else type(exc).__name__
+        with core.db() as conn:
+            conn.execute("UPDATE translation_jobs SET status='failed',error=?,updated=? WHERE document_id=? AND language=? AND status IN ('queued','running')", (message[:1500], core.now(), did, body.language))
+
+
+@router.post('/projects/{pid}/documents/{did}/translation-job')
+def start_translation(pid: str, did: str, body: FullTranslateBody):
+    doc = document(pid, did)
+    if not body.start_page <= body.end_page <= doc['pages']:
+        raise HTTPException(422, '请选择有效翻译页范围')
+    if not core.settings()['base_url']:
+        raise HTTPException(409, '请先配置模型服务')
+    total = sum(1 for s in spans(doc) if body.start_page <= s['page'] <= body.end_page)
+    if not total:
+        raise HTTPException(422, '选定范围没有可翻译原文')
+    with TRANSLATION_LOCK, core.db() as conn:
+        for key, future in list(TRANSLATION_FUTURES.items()):
+            if future.done():
+                del TRANSLATION_FUTURES[key]
+        if (did, body.language) in TRANSLATION_FUTURES:
+            raise HTTPException(409, '上一翻译请求尚未结束，请稍后继续；已保存译文保留')
+        conn.execute('BEGIN IMMEDIATE')
+        ingestion = conn.execute('SELECT status FROM document_ingestions WHERE document_id=?', (did,)).fetchone()
+        if ingestion and ingestion['status'] != 'completed':
+            raise HTTPException(409, '请等待全文解析完成后开始批量翻译')
+        current = conn.execute('SELECT status FROM translation_jobs WHERE document_id=? AND language=?', (did, body.language)).fetchone()
+        if current and current['status'] in {'running', 'queued'}:
+            raise HTTPException(409, '此文献已有翻译任务')
+        if conn.execute("SELECT COUNT(*) FROM translation_jobs WHERE status IN ('running','queued')").fetchone()[0] >= 4:
+            raise HTTPException(429, '已有4份翻译任务，请等待或停止现有任务')
+        conn.execute('INSERT INTO translation_jobs VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(document_id,language) DO UPDATE SET status=excluded.status,start_page=excluded.start_page,end_page=excluded.end_page,completed=0,total=excluded.total,error=excluded.error,updated=excluded.updated', (did, body.language, 'queued', body.start_page, body.end_page, 0, total, '', core.now()))
+        TRANSLATION_FUTURES[(did, body.language)] = TRANSLATION_POOL.submit(run_translation, pid, did, body)
+    return translation_job(pid, did, body.language)
+
+
+@router.delete('/projects/{pid}/documents/{did}/translation-job')
+def stop_translation(pid: str, did: str, language: Literal['zh', 'en'] = 'zh'):
+    document(pid, did)
+    with core.db() as conn:
+        conn.execute("UPDATE translation_jobs SET status='cancelled',updated=? WHERE document_id=? AND language=? AND status IN ('queued','running')", (core.now(), did, language))
+    return translation_job(pid, did, language)
 
 
 @router.post('/projects/{pid}/documents/{did}/translate')
@@ -208,7 +297,7 @@ def network(pid: str):
         rows = [dict(r) for r in conn.execute('SELECT * FROM literature_references WHERE project_id=? ORDER BY created,id', (pid,))]
         docs = [dict(r) for r in conn.execute('SELECT id,title FROM documents WHERE project_id=?', (pid,))]
     for row in rows:
-        row['url'] = ('https://doi.org/' + quote(row['identifier'][4:], safe='/') if row['identifier'].startswith('doi:') else 'https://arxiv.org/abs/' + quote(row['identifier'][6:], safe='/'))
+        row['url'] = ('https://doi.org/' + quote(row['identifier'][4:], safe='/') if row['identifier'].startswith('doi:') else 'https://arxiv.org/abs/' + quote(row['identifier'][6:], safe='/') if row['identifier'].startswith('arxiv:') else '')
     return {'documents': docs, 'references': rows, 'scope': '仅为本项目提取并由作者核对的引用关系；不是全网被引统计，也不表示论文质量或研究新颖性。'}
 
 

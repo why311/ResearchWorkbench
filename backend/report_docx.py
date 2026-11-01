@@ -88,19 +88,23 @@ def inline(paragraph, tokens):
                 run.font.size = Pt(10)
 
 
-def table(document, headings, rows, widths=None):
+def table(document, headings, rows, widths=None, school=False):
     if not 1 <= len(headings) <= 8:
         raise ValueError('Word表格需为1—8列，请拆分较宽的表格')
     result = document.add_table(rows=1, cols=len(headings))
     result.autofit = False
-    widths = widths or [6.9 / len(headings)] * len(headings)
+    section = document.sections[-1]
+    available = (section.page_width-section.left_margin-section.right_margin)/914400
+    widths = widths or [available / len(headings)] * len(headings)
+    if sum(widths) > available:
+        widths = [w * available/sum(widths) for w in widths]
     for column, width in zip(result.columns, widths):
         column.width = Inches(width)
     properties = result._tbl.tblPr
     borders = OxmlElement('w:tblBorders')
     for side in ('top', 'left', 'bottom', 'right', 'insideH', 'insideV'):
         border = OxmlElement('w:' + side)
-        for name, value in [('val', 'single'), ('sz', '4'), ('color', 'D9D9D9')]:
+        for name, value in [('val', 'single' if not school or side in {'top','bottom'} else 'nil'), ('sz', '12' if school else '4'), ('color', '000000' if school else 'D9D9D9')]:
             border.set(qn('w:' + name), value)
         borders.append(border)
     properties.append(borders)
@@ -116,9 +120,15 @@ def table(document, headings, rows, widths=None):
                 edge = OxmlElement('w:' + name)
                 edge.set(qn('w:w'), '100'); edge.set(qn('w:type'), 'dxa'); margin.append(edge)
             cell._tc.get_or_add_tcPr().append(margin)
-            if index == 0:
+            if index == 0 and not school:
                 fill = OxmlElement('w:shd'); fill.set(qn('w:fill'), 'E8EEF8'); cell._tc.get_or_add_tcPr().append(fill)
+            if index == 0 and school:
+                lines = OxmlElement('w:tcBorders'); line = OxmlElement('w:bottom'); line.set(qn('w:val'),'single'); line.set(qn('w:sz'),'8'); lines.append(line); cell._tc.get_or_add_tcPr().append(lines)
             paragraph = cell.paragraphs[0]
+            if school:
+                paragraph.paragraph_format.first_line_indent = Pt(0)
+                paragraph.paragraph_format.left_indent = Pt(0)
+                paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER if index == 0 else WD_ALIGN_PARAGRAPH.LEFT
             paragraph.paragraph_format.space_after = Pt(3)
             paragraph.paragraph_format.space_before = Pt(3)
             value = values[column] if column < len(values) else ''
@@ -134,7 +144,7 @@ def table(document, headings, rows, widths=None):
     return result
 
 
-def markdown(document, text):
+def markdown(document, text, school=False):
     parser = MarkdownIt('commonmark', {'html': False}).enable('table')
     parser.inline.ruler.before('escape', 'word_math', math_rule)
     tokens = parser.parse(text)
@@ -156,7 +166,7 @@ def markdown(document, text):
                 elif item.type == 'table_close':
                     break
             if rows:
-                table(document, rows[0], rows[1:])
+                table(document, rows[0], rows[1:], school=school)
         elif token.type == 'heading_open':
             paragraph = document.add_heading('', min(int(token.tag[1:]), 4))
         elif token.type in {'bullet_list_open', 'ordered_list_open'}:
@@ -171,7 +181,12 @@ def markdown(document, text):
             quote_depth -= 1
         elif token.type == 'paragraph_open':
             style = 'List Bullet' if lists and first and lists[-1]['kind'] == 'bullet_list_open' else None
+            missing_bullet_style = style and style not in document.styles
+            if missing_bullet_style:
+                style = None
             paragraph = document.add_paragraph(style=style)
+            if missing_bullet_style:
+                paragraph.add_run('• ')
             if lists and first and lists[-1]['kind'] == 'ordered_list_open':
                 paragraph.add_run(str(lists[-1]['number']) + '. ')
                 lists[-1]['number'] += 1
@@ -187,42 +202,76 @@ def markdown(document, text):
         index += 1
 
 
-def export_word(state, version, created):
-    doc = Document()
-    section = doc.sections[0]
-    section.page_width, section.page_height = Inches(8.5), Inches(11)
-    section.left_margin = section.right_margin = Inches(.8)
-    section.top_margin = section.bottom_margin = Inches(.75)
-    normal = doc.styles['Normal']
-    normal.font.name, normal.font.size = 'Calibri', Pt(11.5)
-    normal._element.get_or_add_rPr().rFonts.set(qn('w:eastAsia'), 'Microsoft YaHei')
-    normal.paragraph_format.line_spacing = 1.35
-    normal.paragraph_format.space_after = Pt(7)
-    title_properties = doc.styles['Title']._element.find(qn('w:pPr'))
-    for border in list(title_properties.findall(qn('w:pBdr'))) if title_properties is not None else []:
-        title_properties.remove(border)
-    for name, size in [('Title', 24), ('Subtitle', 11), ('Heading 1', 17), ('Heading 2', 14), ('Heading 3', 12), ('Heading 4', 11.5)]:
-        style = doc.styles[name]
-        style.font.name, style.font.size = 'Calibri', Pt(size)
-        style.font.color.rgb = RGBColor(0, 0, 0)
-        style._element.get_or_add_rPr().rFonts.set(qn('w:eastAsia'), 'Microsoft YaHei')
-        style.paragraph_format.keep_with_next = True
-        style.paragraph_format.space_before = Pt(14)
-        style.paragraph_format.space_after = Pt(7)
-    code = doc.styles.add_style('Code Block', 1)
+def export_word(state, version, created, template_path=None):
+    if template_path:
+        from copy import deepcopy
+        doc = Document(template_path)
+        body_section = next((s for s in doc.sections if '绪论' in ''.join(p.text for p in s.header.paragraphs)), doc.sections[0])
+        properties = deepcopy(body_section._sectPr)
+        for child in list(doc._element.body):
+            doc._element.body.remove(child)
+        doc._element.body.append(properties)
+        section = doc.sections[0]
+        page_numbering = section._sectPr.find(qn('w:pgNumType'))
+        if page_numbering is None:
+            page_numbering = OxmlElement('w:pgNumType'); section._sectPr.append(page_numbering)
+        page_numbering.set(qn('w:fmt'), 'decimal'); page_numbering.set(qn('w:start'), '1')
+        normal = doc.styles['Normal']
+        if 'Title' not in doc.styles:
+            title = doc.styles.add_style('Title', 1)
+            title.base_style = doc.styles['Heading 1']
+            properties = title.element.get_or_add_pPr()
+            numbering = OxmlElement('w:numPr'); number = OxmlElement('w:numId'); number.set(qn('w:val'), '0'); numbering.append(number); properties.append(numbering)
+            level = OxmlElement('w:outlineLvl'); level.set(qn('w:val'), '9'); properties.append(level)
+    else:
+        doc = Document()
+        section = doc.sections[0]
+        section.page_width, section.page_height = Inches(8.5), Inches(11)
+        section.left_margin = section.right_margin = Inches(.8)
+        section.top_margin = section.bottom_margin = Inches(.75)
+        normal = doc.styles['Normal']
+        normal.font.name, normal.font.size = 'Calibri', Pt(11.5)
+        normal._element.get_or_add_rPr().rFonts.set(qn('w:eastAsia'), 'Microsoft YaHei')
+        normal.paragraph_format.line_spacing = 1.35
+        normal.paragraph_format.space_after = Pt(7)
+        title_properties = doc.styles['Title']._element.find(qn('w:pPr'))
+        for border in list(title_properties.findall(qn('w:pBdr'))) if title_properties is not None else []:
+            title_properties.remove(border)
+        for name, size in [('Title', 24), ('Subtitle', 11), ('Heading 1', 17), ('Heading 2', 14), ('Heading 3', 12), ('Heading 4', 11.5)]:
+            style = doc.styles[name]
+            style.font.name, style.font.size = 'Calibri', Pt(size)
+            style.font.color.rgb = RGBColor(0, 0, 0)
+            style._element.get_or_add_rPr().rFonts.set(qn('w:eastAsia'), 'Microsoft YaHei')
+            style.paragraph_format.keep_with_next = True
+            style.paragraph_format.space_before = Pt(14)
+            style.paragraph_format.space_after = Pt(7)
+    code = doc.styles['Code Block'] if 'Code Block' in doc.styles else doc.styles.add_style('Code Block', 1)
     code.base_style = normal
     code.font.name, code.font.size = 'Consolas', Pt(9.5)
     code.paragraph_format.line_spacing = 1.15
     header = section.header.paragraphs[0]
-    header.add_run('研舟 · 科研成果记录').font.size = Pt(9)
+    if template_path:
+        header.text = state['title']
+    else:
+        header.add_run('研舟 · 科研成果记录').font.size = Pt(9)
     footer = section.footer.paragraphs[0]
+    if template_path:
+        footer.clear()
     footer.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    footer.add_run(f'第{version}版 · ')
+    if not template_path:
+        footer.add_run(f'第{version}版 · ')
     field = OxmlElement('w:fldSimple'); field.set(qn('w:instr'), 'PAGE'); footer._p.append(field)
     doc.add_heading(state['title'], 0)
-    doc.add_paragraph(f'成果版本：{version}  |  生成时间：{created}', 'Subtitle')
+    if not template_path:
+        doc.add_paragraph(f'成果版本：{version}  |  生成时间：{created}', 'Subtitle')
     rendered = body_markdown(state)
-    markdown(doc, rendered)
+    if template_path:
+        levels = [len(m[1]) for m in re.finditer(r'^(#{1,6})\s+', rendered, re.M)]
+        depth = min(levels, default=1)-1
+        rendered = re.sub(r'^(#{1,6})(\s+)', lambda m: '#' * max(1,len(m[1])-depth) + m[2], rendered, flags=re.M)
+        settings = doc.settings.element
+        refresh = OxmlElement('w:updateFields'); refresh.set(qn('w:val'), 'true'); settings.append(refresh)
+    markdown(doc, rendered, school=bool(template_path))
     if state.get('citations'):
         doc.add_heading('文献原文依据', 1)
         doc.add_paragraph('以下为作者选择的原文片段，保留来源以便核对；引用本身不表示原文支持作者的全部推断。')
@@ -238,7 +287,7 @@ def export_word(state, version, created):
         configure_plot()
         doc.add_heading('结果图表', 1)
         doc.add_paragraph('横轴序号对应下表中的运行。缺失指标不补为零。')
-        table(doc, ['序号', '来源运行'], [[i + 1, r['name']] for i, r in enumerate(state['chart'])], [.6, 6.3])
+        table(doc, ['序号', '来源运行'], [[i + 1, r['name']] for i, r in enumerate(state['chart'])], [.6, 6.3], school=bool(template_path))
         for metric in state['chart_metrics']:
             data = [(i + 1, r['metrics'].get(metric)) for i, r in enumerate(state['chart']) if type(r['metrics'].get(metric)) in (int, float) and math.isfinite(r['metrics'][metric])]
             if not data:
@@ -253,11 +302,11 @@ def export_word(state, version, created):
                 plt.close(fig)
             caption = doc.add_paragraph('图：' + metric)
             caption.paragraph_format.keep_with_next = True
-            image.seek(0); doc.add_picture(image, width=Inches(6.8))
+            image.seek(0); doc.add_picture(image, width=Inches(min(6.8,(section.page_width-section.left_margin-section.right_margin)/914400)))
     doc.add_heading('指标与来源说明', 1)
     doc.add_paragraph('以下数据属于本成果生成时保存的版本。后续草稿或引用修改不会改变本文件中的历史数值。解释与结论由作者核对，数值差异不自动证明因果或统计显著性。')
     if state['bindings']:
-        table(doc, ['变量', '显示值', '指标'], [[b['alias'], b['formatted'], b['metric']] for b in state['bindings']], [1.8, 1.4, 3.7])
+        table(doc, ['变量', '显示值', '指标'], [[b['alias'], b['formatted'], b['metric']] for b in state['bindings']], [1.8, 1.4, 3.7], school=bool(template_path))
     sources = {b['run_id']: {'name': b['run_name'], 'config': b['source_config'], 'created': b['source_created']} for b in state['bindings']}
     sources.update({r['id']: r for r in state['chart']})
     for index, (rid, run) in enumerate(sources.items(), 1):

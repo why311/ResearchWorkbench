@@ -160,6 +160,62 @@ class SearchBody(BaseModel):
     hybrid: bool = True
 
 
+class DuplicateBody(BaseModel):
+    document_ids: list[str] = Field(min_length=2, max_length=8)
+
+
+@router.post('/projects/{pid}/semantic-duplicates')
+def semantic_duplicates(pid: str, body: DuplicateBody):
+    if len(set(body.document_ids)) != len(body.document_ids):
+        raise HTTPException(422, '请选择不重复的文献')
+    docs = [document(pid, did) for did in body.document_ids]
+    vectors, texts = {}, {}
+    total = 0
+    with core.db() as conn:
+        for doc in docs:
+            state = conn.execute('SELECT * FROM semantic_indexes WHERE document_id=?', (doc['id'],)).fetchone()
+            if not state or state['status'] != 'ready' or state['model_revision'] != REVISION or not REVISION:
+                raise HTTPException(409, '请先为所选文献建立同一模型版本的完整语义索引')
+            count = conn.execute('SELECT COUNT(*) FROM semantic_passages WHERE document_id=?', (doc['id'],)).fetchone()[0]
+            total += count
+            if total > 8000:
+                raise HTTPException(422, '本轮超过8000个语义窗口，请缩小比较范围；不会截断后判断版本')
+            rows = conn.execute('SELECT text,vector FROM semantic_passages WHERE document_id=? ORDER BY span_id,part', (doc['id'],)).fetchall()
+            if not rows:
+                raise HTTPException(409, '语义索引没有可比较的窗口，请重新建立')
+            vectors[doc['id']] = np.stack([np.frombuffer(r['vector'], dtype=np.float32) for r in rows])
+            texts[doc['id']] = [r['text'] for r in rows]
+    pairs = []
+    for index, first in enumerate(docs):
+        for second in docs[index+1:]:
+            a, b = vectors[first['id']], vectors[second['id']]
+            best_a, best_b, witnesses = [], np.full(len(b), -1., dtype=np.float32), []
+            for start in range(0, len(a), 64):
+                similarities = np.clip(a[start:start+64] @ b.T, -1, 1)
+                maxima = similarities.max(axis=1)
+                best_a.extend(maxima.tolist())
+                best_b = np.maximum(best_b, similarities.max(axis=0))
+                for offset, score in enumerate(maxima):
+                    witnesses.append((float(score), start+offset, int(similarities[offset].argmax())))
+            coverage_a = sum(s >= .88 for s in best_a)/len(a)
+            coverage_b = float(np.mean(best_b >= .88))
+            score = (float(np.mean(best_a))+float(np.mean(best_b)))/2
+            examples, used = [], set()
+            for similarity, ai, bi in sorted(witnesses, reverse=True):
+                if bi in used:
+                    continue
+                examples.append({'similarity': round(similarity, 4), 'first': texts[first['id']][ai], 'second': texts[second['id']][bi]})
+                used.add(bi)
+                if len(examples) == 3:
+                    break
+            pairs.append({'first_id': first['id'], 'second_id': second['id'], 'similarity': round(score, 4),
+                          'first_coverage': round(coverage_a, 4), 'second_coverage': round(coverage_b, 4),
+                          'candidate': min(coverage_a, coverage_b) >= .65, 'examples': examples})
+    return {'pairs': sorted(pairs, key=lambda p: p['similarity'], reverse=True), 'windows': total,
+            'model': MODEL_NAME, 'revision': REVISION,
+            'scope': '比较完整索引窗口的双向最近语义相似度；覆盖率为相似度≥0.88的窗口比例。双向覆盖均≥65%时提示候选，这是经验阈值，不是重复概率。相关主题也可能相近，需核对正文差异与版本日期；不自动合并、删除或替换。'}
+
+
 @router.post('/projects/{pid}/semantic-search')
 def search(pid: str, body: SearchBody):
     if not body.question.strip():

@@ -82,15 +82,36 @@ def update(jid, **values):
         conn.execute('UPDATE document_ingestions SET ' + ','.join(k + '=?' for k in values) + ' WHERE id=?', [json.dumps(v, ensure_ascii=False) if isinstance(v, dict) else v for v in values.values()] + [jid])
 
 
+def stop_process(proc):
+    """Stop this parser's descendants too, including a Windows venv launcher."""
+    import psutil
+    try:
+        for child in psutil.Process(proc.pid).children(recursive=True):
+            try:
+                child.kill()
+            except psutil.NoSuchProcess:
+                pass
+    except psutil.NoSuchProcess:
+        pass
+    if proc.poll() is None:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
 def profile_for(doc, metadata):
     blocks = list(spans(doc))
     sample = '\n'.join(s['text'] for s in blocks)[:80000]
     doi = re.search(r'10\.\d{4,9}/[-._;()/:A-Z0-9]+', sample[:16000], re.I)
-    arxiv = re.search(r'(?:arxiv\s*:\s*|arxiv.org/(?:abs|pdf)/)(\d{4}\.\d{4,5})(?:v(\d+))?', sample, re.I)
+    arxiv = re.search(r'(?:arxiv\s*:\s*|arxiv.org/(?:abs|pdf)/)(\d{4}\.\d{4,5})(?:v(\d+))?', '\n'.join(s['text'] for s in blocks if s['page']==1), re.I)
     headings = [{'text': s['text'], 'span_id': s['id'], 'page': s['page'], 'level': s.get('level', 1)} for s in blocks if s.get('kind') == 'heading']
     title = metadata.get('Title', '').strip()
     if not title or title.lower().endswith(('.docx', '.tex')):
-        title = next((s['text'] for s in blocks[:8] if s.get('kind') == 'heading' and len(s['text']) > 10), doc['title'])
+        candidates = [s for s in blocks[:30] if s['page']==1 and 10<len(s['text'])<300
+                      and not re.search(r'@|arxiv|copyright|permission|attribution|^abstract\b|^摘要|https?://', s['text'], re.I)]
+        sizes = [s.get('font_size',0) for s in candidates]
+        largest = max(sizes, default=0)
+        prominent = [s for s in candidates if largest and s.get('font_size',0)>=largest*.95]
+        title = ' '.join(s['text'] for s in prominent[:3]) if prominent else next((s['text'] for s in candidates if s.get('kind')=='heading'), doc['title'])
     result = {'title': title[:300], 'author': metadata.get('Author', ''), 'doi': doi[0].rstrip('.,;)') if doi else '',
         'arxiv': arxiv[1] if arxiv else '', 'version': int(arxiv[2]) if arxiv and arxiv[2] else None,
         'heading_count': len(headings), 'headings': headings, 'characters': sum(len(s['text']) for s in blocks),
@@ -158,7 +179,8 @@ def parse_job(pid, jid):
                 raise ValueError('解析超过运行预算；已完成页保留，可继续解析')
             import psutil
             try:
-                if psutil.Process(proc.pid).memory_info().rss > 1024 * 1024 * 1024:
+                worker = psutil.Process(proc.pid)
+                if sum(p.memory_info().rss for p in [worker, *worker.children(recursive=True)] if p.is_running()) > 1024 * 1024 * 1024:
                     raise ValueError('解析进程内存超过1GB；已完成页保留')
             except psutil.NoSuchProcess:
                 pass
@@ -196,9 +218,10 @@ def parse_job(pid, jid):
                 profile['parsed_title'] = profile['title']
                 profile['title'] = source_metadata['title'][:300]
                 profile['parsed_arxiv'] = profile['arxiv']
-                identifier = re.fullmatch(r'(.+?)(?:v(\d+))?', source_metadata['arxiv_id'])
-                profile['arxiv'] = identifier[1]
-                profile['version'] = int(identifier[2]) if identifier[2] else None
+                identifier = re.fullmatch(r'(.+?)(?:v(\d+))?', source_metadata.get('arxiv_id', ''))
+                if identifier:
+                    profile['arxiv'] = identifier[1]
+                    profile['version'] = int(identifier[2]) if identifier[2] else None
                 profile['metadata_source'] = source_metadata
             conn.execute('UPDATE documents SET title=? WHERE id=?', (profile['title'], doc['id']))
             conn.execute("UPDATE document_ingestions SET status='completed',profile=?,updated=? WHERE id=?", (json.dumps(profile, ensure_ascii=False), core.now(), jid))
@@ -209,9 +232,8 @@ def parse_job(pid, jid):
         except HTTPException:
             pass  # Project/document was removed while parsing.
     finally:
-        if proc and proc.poll() is None:
-            proc.kill()
-            proc.wait(timeout=5)
+        if proc:
+            stop_process(proc)
         with LOCK:
             PROCESSES.pop(jid, None)
 
@@ -219,9 +241,9 @@ def parse_job(pid, jid):
 @router.post('/projects/{pid}/document-ingestions')
 async def ingest(pid: str, file: UploadFile = File(...)):
     core.project(pid)
-    content = await file.read(20 * 1024 * 1024 + 1)
-    if len(content) > 20 * 1024 * 1024:
-        raise HTTPException(413, '单篇资料最大20MB')
+    content = await file.read(32 * 1024 * 1024 + 1)
+    if len(content) > 32 * 1024 * 1024:
+        raise HTTPException(413, '结构化PDF最大32MB')
     filename = Path(file.filename or 'document.pdf').name
     if Path(filename).suffix.lower() != '.pdf':
         raise HTTPException(422, '结构化解析接收PDF；文本与Markdown使用文献库普通导入')

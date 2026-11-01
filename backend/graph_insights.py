@@ -13,6 +13,81 @@ from .literature import network
 router = APIRouter(prefix='/api')
 
 
+@router.post('/projects/{pid}/reference-network/match')
+def match_project_references(pid: str):
+    """Link unique in-project identifiers/titles as reviewable candidates."""
+    from .document_tools import citation_map
+    from .literature import identifiers
+    core.project(pid)
+    docs = core.records('documents', pid)
+    if len(docs) > 40:
+        raise HTTPException(422, '自动匹配最多40篇项目文献，请按研究范围拆分项目')
+    normalize = lambda text: ''.join(re.findall(r'\w', text.lower()))
+    by_identifier, by_title = {}, {}
+    for doc in docs:
+        first_page = '\n'.join(s['text'] for s in spans(doc) if s['page']==1)
+        keys = {i[0] for i in identifiers(first_page)}
+        # More than one identifier on a title page may include cited works.
+        for key in keys if len(keys)==1 else []:
+            by_identifier.setdefault(key, []).append(doc['id'])
+        title = normalize(doc['title'])
+        if len(title)>=15:
+            by_title.setdefault(title, []).append(doc['id'])
+    created, ambiguous = 0, 0
+    for doc in docs:
+        refs = citation_map(pid, doc['id'])['references']
+        if not refs:
+            # Author-year bibliographies have no [n] labels. Keep the actual source
+            # paragraph and only suggest uniquely matched titles/identifiers.
+            active = False
+            for span in spans(doc):
+                if re.match(r'^\s*(?:references|bibliography|参考文献)\s*$', span['text'], re.I):
+                    active = True
+                    continue
+                if active and span.get('kind')=='heading' and re.match(r'^\s*(?:appendix|supplementary|附录)\b', span['text'], re.I):
+                    break
+                if not active:
+                    continue
+                text = normalize(span['text'])
+                suggested = [(key, ids) for key,ids in by_identifier.items() if key in {i[0] for i in identifiers(span['text'])}]
+                suggested += [('title:'+title,ids) for title,ids in by_title.items() if title in text]
+                for key,ids in suggested:
+                    targets = [i for i in ids if i!=doc['id']]
+                    if len(targets)==1:
+                        refs.append({'span_id':span['id'],'text':span['text'],'match':(targets[0],key)})
+                    elif len(targets)>1:
+                        ambiguous += 1
+        if len(refs)>1000:
+            raise HTTPException(422, '单篇参考文献超过1000条，请先缩小项目范围')
+        with core.db() as conn:
+            count = conn.execute('SELECT COUNT(*) FROM literature_references WHERE document_id=?', (doc['id'],)).fetchone()[0]
+            for ref in refs:
+                matches = [ref['match']] if ref.get('match') else []
+                for identifier, _, _ in ([] if ref.get('match') else identifiers(ref['text'])):
+                    for target in by_identifier.get(identifier, []):
+                        matches.append((target, identifier))
+                text = normalize(ref['text'])
+                if not matches:
+                    for title, targets in by_title.items():
+                        if title in text:
+                            matches.extend((target, 'title:'+title) for target in targets)
+                targets = {target for target,_ in matches if target!=doc['id']}
+                if len(targets)!=1:
+                    ambiguous += len(targets)>1
+                    continue
+                target = next(iter(targets))
+                identifier = next(identifier for t,identifier in matches if t==target)
+                existing = conn.execute('SELECT id FROM literature_references WHERE document_id=? AND identifier=?', (doc['id'],identifier)).fetchone()
+                if existing or count>=1000:
+                    continue
+                label = next(d['title'] for d in docs if d['id']==target)
+                conn.execute('INSERT INTO literature_references VALUES (?,?,?,?,?,?,?,?,?,?,?)', (core.uid(),pid,doc['id'],ref['span_id'],identifier,label[:300],ref['text'],'candidate',target,core.now(),core.now()))
+                created += 1
+                count += 1
+    return {'created': created, 'ambiguous': ambiguous,
+            'scope': '仅将参考文献条目与本项目唯一标识或完整题名匹配为候选；人工确认前不参与PageRank。多版本或同名歧义保持待核对，不覆盖已有人工记录。'}
+
+
 def topology(documents, references):
     ids = {d['id'] for d in documents}
     # Two identifiers for the same linked paper still represent one citation edge.
@@ -58,7 +133,8 @@ def insights(pid: str):
     data = network(pid)
     result = topology(data['documents'], data['references'])
     linked = [r for r in data['references'] if r['status'] == 'confirmed' and r['target_document_id']]
-    return {**result, 'excluded_references': len(data['references']) - len(linked),
+    candidate_edges = sorted({(r['document_id'],r['target_document_id']) for r in data['references'] if r['status']=='candidate' and r['target_document_id'] and r['document_id']!=r['target_document_id']})
+    return {**result, 'candidate_edges': [{'source':a,'target':b} for a,b in candidate_edges], 'excluded_references': len(data['references']) - len(linked),
             'summary': f"本项目有{len(result['nodes'])}篇全文、{len(result['edges'])}条已确认且已关联全文的有向关系、{len(result['components'])}个弱连通分量。",
             'scope': 'PageRank阻尼系数0.85，沿施引文献指向被引文献计算；只反映当前项目已确认的连接，不代表全网影响力、论文质量或研究新颖性。孤立节点不能据此判断为边缘研究。'}
 

@@ -22,9 +22,31 @@ def heading_level(text, size, median):
     return 0
 
 
+def order_ocr(blocks, width):
+    """Read a detected two-column band downwards, preserving full-width lines."""
+    center = width / 2
+    wide = [b for b in blocks if b['bbox'][0] < center-12 and b['bbox'][2] > center+12]
+    narrow = [b for b in blocks if b not in wide]
+    left = [b for b in narrow if (b['bbox'][0]+b['bbox'][2])/2 < center]
+    right = [b for b in narrow if b not in left]
+    shared = {round(b['bbox'][1]/10) for b in left} & {round(b['bbox'][1]/10) for b in right}
+    if min(len(left), len(right)) < 6 or len(shared) < 4 or len(wide) > len(blocks)*.3:
+        return sorted(blocks, key=lambda b: (b['bbox'][1], b['bbox'][0])), False
+    ordered = []
+    for divider in sorted(wide, key=lambda b: b['bbox'][1]):
+        for column in (left, right):
+            before = [b for b in column if b['bbox'][1] < divider['bbox'][1]]
+            ordered.extend(sorted(before, key=lambda b: b['bbox'][1]))
+            column[:] = [b for b in column if b not in before]
+        ordered.append(divider)
+    ordered.extend(sorted(left, key=lambda b: b['bbox'][1]))
+    ordered.extend(sorted(right, key=lambda b: b['bbox'][1]))
+    return ordered, True
+
+
 def text_blocks(page):
     # Find a genuine empty central gutter. Full-width titles stay above the columns.
-    words = page.extract_words()
+    words = page.extract_words(x_tolerance_ratio=.12)
     center = float(page.width) / 2
     interior = [w for w in words if float(page.height) * .15 < w['top'] < float(page.height) * .9]
     left = [w for w in interior if w['x1'] < center - 8]
@@ -44,7 +66,7 @@ def text_blocks(page):
     median = statistics.median(sizes) if sizes else 10
     blocks = []
     for region in regions:
-        lines = region.extract_text_lines(return_chars=True)
+        lines = region.extract_text_lines(return_chars=True, x_tolerance_ratio=.12)
         pending = []
         def flush():
             if not pending:
@@ -52,7 +74,8 @@ def text_blocks(page):
             text = '\n'.join(x['text'] for x in pending)
             box = [min(x['x0'] for x in pending), min(x['top'] for x in pending), max(x['x1'] for x in pending), max(x['bottom'] for x in pending)]
             for offset in range(0, len(text), 1500):
-                blocks.append({'text': text[offset:offset + 1500], 'kind': 'paragraph', 'bbox': box, 'level': 0})
+                blocks.append({'text': text[offset:offset + 1500], 'kind': 'paragraph', 'bbox': box, 'level': 0,
+                               'font_size': round(statistics.median(c['size'] for line in pending for c in line.get('chars', []) if c.get('text','').strip()),2)})
             pending.clear()
         for line in lines:
             text = line['text'].strip()
@@ -64,7 +87,7 @@ def text_blocks(page):
             if level or gap > median * .9 or sum(len(x['text']) for x in pending) > 1100:
                 flush()
             if level:
-                blocks.append({'text': text, 'kind': 'heading', 'bbox': [line['x0'], line['top'], line['x1'], line['bottom']], 'level': level})
+                blocks.append({'text': text, 'kind': 'heading', 'bbox': [line['x0'], line['top'], line['x1'], line['bottom']], 'level': level, 'font_size': round(size,2)})
             else:
                 pending.append(line)
         flush()
@@ -96,15 +119,23 @@ def extract(path, start=1, ocr=True):
                 blocks = []
                 for points, text, confidence in results or []:
                     box = [min(p[0] for p in points) * sx, min(p[1] for p in points) * sy, max(p[0] for p in points) * sx, max(p[1] for p in points) * sy]
-                    blocks.append({'text': text, 'kind': 'paragraph', 'bbox': box, 'level': heading_level(text, 10, 10), 'confidence': round(float(confidence), 3)})
+                    level = heading_level(text, 10, 10)
+                    blocks.append({'text': text, 'kind': 'heading' if level else 'paragraph', 'bbox': box, 'level': level, 'confidence': round(float(confidence), 3), 'font_size': round((box[3]-box[1])*.75,2)})
                 method = 'ocr'
-                columns = False
+                blocks, columns = order_ocr(blocks, float(page.width))
             tables = []
             if method == 'native' and (page.lines or page.rects):
                 for table in page.find_tables()[:30]:
                     rows = table.extract()
                     if len(rows) >= 2 and len(rows[0]) >= 2:
                         tables.append({'bbox': list(table.bbox), 'rows': rows, 'method': 'vector-lines'})
+            # Borderless academic tables: only attempt on pages with a table caption.
+            if method == 'native' and not tables and any(re.search(r'\bTable\s+\d|表\s*\d', b['text']) for b in blocks):
+                for table in page.find_tables({'vertical_strategy': 'text', 'horizontal_strategy': 'text', 'min_words_vertical': 4})[:3]:
+                    rows = [r for r in table.extract() if sum(bool(c and c.strip()) for c in r) >= 2]
+                    numeric = sum(bool(re.search(r'\d', str(c))) for r in rows for c in r)
+                    if 2 <= len(rows) <= 100 and 2 <= len(rows[0]) <= 15 and numeric >= 4:
+                        tables.append({'bbox': list(table.bbox), 'rows': rows, 'method': 'text-alignment-candidate', 'uncertain': True})
             figures = [{'bbox': [im['x0'], im['top'], im['x1'], im['bottom']]} for im in page.images[:50]]
             for n, block in enumerate(blocks, 1):
                 block['id'] = f'p{index}-s{n}'
