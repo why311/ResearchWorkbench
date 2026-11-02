@@ -72,5 +72,8 @@ app.include_router(evidence_router)
 from .reading import router as reading_router
 app.include_router(reading_router)
 
+from .translations import router as translations_router
+app.include_router(translations_router)
+
 if (ROOT / 'dist').exists():
     app.mount('/', StaticFiles(directory=ROOT / 'dist', html=True), name='frontend')
