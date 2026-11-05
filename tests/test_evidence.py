@@ -31,6 +31,6 @@ def test_search_isolation_validation_and_full_scope_budget(client):
     assert client.get(path, params={'q': 'x' * 201}).status_code == 422
     huge = json.dumps([{'id': f'p1-s{i}', 'page': 1, 'text': 'x' * 1000} for i in range(2001)])
     with core.db() as conn:
-        conn.execute('INSERT INTO documents VALUES (?,?,?,?,?,?)', ('large', pid, 'Large fixture', 'large.txt', 1, huge))
+        conn.execute('INSERT INTO documents(id,project_id,title,filename,pages,spans) VALUES (?,?,?,?,?,?)', ('large', pid, 'Large fixture', 'large.txt', 1, huge))
     assert client.get(path, params={'q': 'secret'}).status_code == 422
     assert client.get(path, params={'q': 'secret', 'document_id': did}).json()['items'][0]['document_id'] == did

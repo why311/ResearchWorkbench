@@ -34,7 +34,13 @@ def document(pid, did):
         row = conn.execute('SELECT * FROM documents WHERE id=? AND project_id=?', (did, pid)).fetchone()
     if not row:
         raise HTTPException(404, '这篇文献不属于当前项目')
-    return dict(row)
+    value = dict(row)
+    with core.db() as conn:
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='document_blocks'").fetchone():
+            blocks = conn.execute('SELECT span_id,page,text FROM document_blocks WHERE document_id=? ORDER BY page,ordinal',(did,)).fetchall()
+            if blocks:
+                value['spans'] = json.dumps([{'id':r['span_id'],'page':r['page'],'text':r['text']} for r in blocks],ensure_ascii=False)
+    return value
 
 
 @router.get('/projects/{pid}')
@@ -42,7 +48,7 @@ def project_detail(pid: str):
     value = project(pid)
     with core.db() as conn:
         rows = conn.execute('SELECT id,title,filename,pages,spans FROM documents WHERE project_id=? ORDER BY rowid DESC', (pid,)).fetchall()
-    value['documents'] = [{k: r[k] for k in ('id', 'title', 'filename', 'pages')} | {'span_count': len(json.loads(r['spans']))} for r in rows]
+    value['documents'] = [{k: r[k] for k in ('id', 'title', 'filename', 'pages')} | {'span_count': len(json.loads(document(pid,r['id'])['spans']))} for r in rows]
     return value
 
 
@@ -84,7 +90,7 @@ async def upload(pid: str, file: UploadFile = File(...)):
     folder.mkdir(parents=True)
     (folder / ('original' + suffix)).write_bytes(content)
     with core.db() as conn:
-        conn.execute('INSERT INTO documents VALUES (?,?,?,?,?,?)', (did, pid, Path(filename).stem, filename, len(pages), json.dumps(spans, ensure_ascii=False)))
+        conn.execute('INSERT INTO documents(id,project_id,title,filename,pages,spans) VALUES (?,?,?,?,?,?)', (did, pid, Path(filename).stem, filename, len(pages), json.dumps(spans, ensure_ascii=False)))
     return {'id': did, 'title': Path(filename).stem, 'pages': len(pages), 'span_count': len(spans)}
 
 

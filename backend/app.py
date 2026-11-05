@@ -65,6 +65,30 @@ async def local_origin(request, call_next):
     return await call_next(request)
 
 
+from datetime import datetime, timezone
+import json
+from contextlib import asynccontextmanager
+
+def now():
+    return datetime.now(timezone.utc).isoformat()
+
+def uid():
+    return uuid.uuid4().hex
+
+def project(pid):
+    from .documents import project as get_project
+    return get_project(pid)
+
+def records(table, pid):
+    if table != 'documents':
+        raise ValueError('Only documents are available in this publication stage')
+    from .ingestion import document, decorate
+    with db() as conn:
+        ids = [row[0] for row in conn.execute('SELECT id FROM documents WHERE project_id=? ORDER BY rowid DESC', (pid,))]
+    return [decorate(document(pid, did)) for did in ids]
+
+from .model import model_json
+
 from .documents import router as documents_router
 app.include_router(documents_router)
 from .evidence import router as evidence_router
@@ -77,6 +101,34 @@ app.include_router(translations_router)
 
 from .references import router as references_router
 app.include_router(references_router)
+
+from .ingestion import router as ingestion_router
+app.include_router(ingestion_router)
+from .discovery import router as discovery_router
+app.include_router(discovery_router)
+from .paper_watch import router as watch_router
+app.include_router(watch_router)
+from .graph_insights import router as graph_router
+app.include_router(graph_router)
+from .reference_downloads import router as download_router
+app.include_router(download_router)
+
+@asynccontextmanager
+async def stage_lifespan(_app):
+    from .paper_watch import start_scheduler
+    from .ingestion import LOCK, PROCESSES, stop_process
+    stop = start_scheduler()
+    yield
+    stop.set()
+    with db() as conn:
+        conn.execute("UPDATE document_ingestions SET status='interrupted',error='服务停止，可继续解析' WHERE status IN ('queued','running')")
+        conn.execute("UPDATE reference_downloads SET status='interrupted',updated=? WHERE status IN ('queued','running')", (now(),))
+    with LOCK:
+        for child in PROCESSES.values():
+            if child.poll() is None:
+                stop_process(child)
+
+app.router.lifespan_context = stage_lifespan
 
 if (ROOT / 'dist').exists():
     app.mount('/', StaticFiles(directory=ROOT / 'dist', html=True), name='frontend')
