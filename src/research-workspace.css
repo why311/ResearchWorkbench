@@ -1,0 +1,18 @@
+.research-workspace nav,
+.research-workspace form { margin-bottom: 24px; }
+.research-workspace fieldset { margin: 16px 0; min-width: 0; }
+.research-workspace fieldset label { margin: 8px 0; }
+.research-workspace input[type="checkbox"] { display: inline-block; width: auto; margin: 0 8px 0 0; }
+.research-workspace .caption { color: #59687e; }
+.research-workspace .comparison-table-scroll { max-width: 100%; overflow: auto; }
+.research-workspace table { border-collapse: collapse; min-width: 640px; text-align: left; }
+.research-workspace th, .research-workspace td { padding: 12px; border: 1px solid #dce4ef; vertical-align: top; }
+.research-workspace small { display: block; }
+.research-workspace svg { vertical-align: middle; }
+.research-workspace pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.research-workspace .tabs, .research-workspace .inline-actions, .research-workspace .note-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 12px 0;
+}

@@ -9,3 +9,4 @@ scikit-learn>=1.5,<2
 pdfplumber>=0.11.10,<0.12
 rapidocr-onnxruntime==1.4.4
 psutil>=7,<8
+fastembed==0.9.0

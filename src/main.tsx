@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
 import ReadingQueue from './ReadingQueue';
@@ -7,6 +7,7 @@ import PaperReading from './PaperReading';
 import ParallelReading from './ParallelReading';
 import References from './References';
 import LiteratureProcessing from './LiteratureProcessing';
+import ResearchWorkspace from './ResearchWorkspace';
 import './reading-queue.css';
 
 type Project = { id: string; name: string; question: string };
@@ -36,6 +37,22 @@ function App() {
   const [notesLoading, setNotesLoading] = useState(false);
   const [noteBusy, setNoteBusy] = useState('');
   const [noteStatus, setNoteStatus] = useState('');
+  const activeProject = useRef(projectId);
+  activeProject.current = projectId;
+  const sourceRequest = useRef(0);
+  const openSource = async (did: string, sid?: string) => {
+    const request = ++sourceRequest.current;
+    try {
+      const target = sid ? await read(`/projects/${projectId}/documents/${did}/spans?limit=100&anchor=${encodeURIComponent(sid)}`) : { page: 1, offset: 0 };
+      if (request !== sourceRequest.current || activeProject.current !== projectId) return;
+      setDocumentId(did);
+      setPage(target.page);
+      setOffset(target.offset);
+      setAnchor(sid || '');
+    } catch (err) {
+      if (request === sourceRequest.current && activeProject.current === projectId) setError((err as Error).message);
+    }
+  };
   const selected = documents.find(d => d.id === documentId);
   const read = async (path: string, options: RequestInit = {}) => {
     const response = await fetch('/api' + path, options);
@@ -88,8 +105,9 @@ function App() {
   };
   return <main><header><span>研舟</span></header><h1>研究项目与文献</h1>{error && <div role="alert">{error}<button onClick={() => { load(); setRevision(n => n + 1); }}>重试</button></div>}<div className="workspace"><form onSubmit={create}><h2>开始一个项目</h2><label>项目名称<input aria-label="项目名称" required maxLength={100} value={name} onChange={e => setName(e.target.value)}/></label><label>研究问题<textarea aria-label="研究问题" rows={4} maxLength={2000} value={question} onChange={e => setQuestion(e.target.value)}/></label><button className="primary" disabled={saving || !!noteBusy || !name.trim()}>{saving ? '保存中…' : '创建项目'}</button></form><section aria-label="项目列表">{loading ? <p role="status">正在读取项目…</p> : projects.length ? projects.map(p => <article key={p.id}><h2>{p.name}</h2><p>{p.question || '尚未填写研究问题'}</p><button disabled={uploading || !!noteBusy} onClick={() => setProjectId(p.id)} aria-pressed={projectId === p.id}>{projectId === p.id ? '当前项目' : '查看项目文献'}</button></article>) : <p className="muted">还没有项目，可以从左侧创建。</p>}</section></div>
     {projectId && <LiteratureProcessing key={'processing-'+projectId} projectId={projectId} documents={documents} reload={()=>setRevision(n=>n+1)} source={did=>{setDocumentId(did);setPage(1);setOffset(0);}}/>}
+    {projectId && <ResearchWorkspace key={'research-'+projectId} project={{id:projectId,question:projects.find(p=>p.id===projectId)?.question||'',documents}} source={openSource}/>}
     {projectId && <EvidenceSearch key={'search-' + projectId} projectId={projectId} documents={documents} source={(did, sid, page, offset) => { setDocumentId(did); setPage(page); setOffset(offset); setAnchor(sid); }}/>}
-    {projectId && <PaperReading key={'reading-' + projectId} projectId={projectId} documents={documents} source={(did,sid,page) => { setDocumentId(did); setPage(page); setOffset(Math.floor((Number(sid.match(/-s(\d+)$/)?.[1] || 1)-1)/100)*100); setAnchor(sid); }}/ >}
+    {projectId && <PaperReading key={'reading-' + projectId} projectId={projectId} documents={documents} source={openSource}/ >}
     {projectId && <ParallelReading key={'parallel-'+projectId} projectId={projectId} documents={documents}/>}
     {projectId && <References key={'references-'+projectId} projectId={projectId} documents={documents} source={(did,sid,page,offset)=>{setDocumentId(did);setPage(page);setOffset(offset);setAnchor(sid);}}/>}
     {projectId && <ReadingQueue key={projectId} refreshKey={queueRevision} onUpdated={() => setNotesRevision(n => n + 1)} projectId={projectId} documents={documents} noteLimit={4000} source={(did, sid, page, offset) => { setDocumentId(did); setPage(page); setOffset(offset); setAnchor(sid); }}/>}

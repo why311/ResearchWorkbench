@@ -7,6 +7,7 @@ import re
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
+from . import app as core
 
 ALIASES = {
     '方法': 'method architecture algorithm approach', '数据': 'dataset corpus samples data',
@@ -49,3 +50,11 @@ class SparseIndex:
                 if score > 0:
                     ranks[index] = ranks.get(index, 0) + 1 / (60 + rank)
         return [{**self.passages[i], 'score': round(float(score), 6)} for i, score in sorted(ranks.items(), key=lambda x: x[1], reverse=True)[:limit]]
+
+
+def retrieve(documents, query, limit=8):
+    result = []
+    for doc in documents:
+        passages = [{'document_id': doc['id'], 'title': doc['title'], **s, 'citation': f"{doc['id']}:{s['id']}"} for s in core.document_spans(doc)]
+        result.extend(SparseIndex(passages).search(query, limit))
+    return sorted(result, key=lambda x: x['score'], reverse=True)[:limit]

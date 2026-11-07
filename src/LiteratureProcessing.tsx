@@ -9,7 +9,7 @@ export default function LiteratureProcessing({projectId,documents,reload,source}
   const [tab,setTab]=useState('pdf'),[jobs,setJobs]=useState<any[]>([]),[revision,setRevision]=useState(0),[busy,setBusy]=useState(''),[error,setError]=useState('');
   const [query,setQuery]=useState(''),[provider,setProvider]=useState('crossref'),[results,setResults]=useState<any>(null),[graph,setGraph]=useState<any>(null);
   const [did,setDid]=useState(''),[page,setPage]=useState(1),[details,setDetails]=useState<any>(null);
-  const base=`/projects/${projectId}`, project={id:projectId,documents};
+  const base=`/projects/${projectId}`, project={id:projectId,question:'',documents};
   const action=async(key:string,task:()=>Promise<any>)=>{setBusy(key);setError('');try{await task();reload();setRevision(n=>n+1);}catch(e){setError((e as Error).message);}finally{setBusy('');}};
   useEffect(()=>{let live=true;let timer:ReturnType<typeof setTimeout>;async function load(){try{const value=await api(base+'/document-ingestions');if(!live)return;setJobs(value);if(value.some((j:any)=>['queued','running'].includes(j.status)))timer=setTimeout(load,1800);}catch(e){if(live)setError((e as Error).message);}}load();return()=>{live=false;clearTimeout(timer);};},[base,revision]);
   useEffect(()=>{let live=true;if(tab==='graph')api(base+'/graph-insights').then(v=>{if(live)setGraph(v);}).catch(e=>{if(live)setError(e.message);});return()=>{live=false;};},[base,tab,revision]);

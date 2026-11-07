@@ -326,6 +326,9 @@ def get_spans(pid: str, did: str, page: int = Query(default=1, ge=1), anchor: st
             position = conn.execute('SELECT ordinal FROM document_blocks WHERE document_id=? AND span_id=?', (did, anchor)).fetchone()
         if position:
             offset = position['ordinal'] // limit * limit
+        else:
+            page_ids = [s['id'] for s in doc['spans'] if s['page'] == page]
+            offset = page_ids.index(anchor) // limit * limit
     if page > doc['pages']:
         raise HTTPException(422, '页码超过文献范围')
     with core.db() as conn:

@@ -20,7 +20,8 @@ def search(pid: str, q: str = Query(min_length=2, max_length=200), document_id: 
         selected = [document(pid, document_id)]
     else:
         with core.db() as conn:
-            selected = [dict(r) for r in conn.execute('SELECT id,title,spans FROM documents WHERE project_id=? ORDER BY rowid', (pid,))]
+            ids = [row[0] for row in conn.execute('SELECT id FROM documents WHERE project_id=? ORDER BY rowid', (pid,))]
+        selected = [document(pid, did) for did in ids]
     passages, characters = [], 0
     for doc in selected:
         counts = {}

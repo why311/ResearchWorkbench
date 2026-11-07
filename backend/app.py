@@ -80,6 +80,10 @@ def project(pid):
     return get_project(pid)
 
 def records(table, pid):
+    if table == 'research_notes':
+        with db() as conn:
+            return [dict(row) | {'source_refs': json.loads(row['source_refs']), 'run_ids': json.loads(row['run_ids'])}
+                    for row in conn.execute('SELECT * FROM research_notes WHERE project_id=? ORDER BY created DESC', (pid,))]
     if table != 'documents':
         raise ValueError('Only documents are available in this publication stage')
     from .ingestion import document, decorate
@@ -87,7 +91,7 @@ def records(table, pid):
         ids = [row[0] for row in conn.execute('SELECT id FROM documents WHERE project_id=? ORDER BY rowid DESC', (pid,))]
     return [decorate(document(pid, did)) for did in ids]
 
-from .model import model_json
+from .model import model_json, settings
 
 from .documents import router as documents_router
 app.include_router(documents_router)
@@ -102,7 +106,7 @@ app.include_router(translations_router)
 from .references import router as references_router
 app.include_router(references_router)
 
-from .ingestion import router as ingestion_router
+from .ingestion import router as ingestion_router, decorate as decorate_document, spans as document_spans
 app.include_router(ingestion_router)
 from .discovery import router as discovery_router
 app.include_router(discovery_router)
@@ -112,6 +116,23 @@ from .graph_insights import router as graph_router
 app.include_router(graph_router)
 from .reference_downloads import router as download_router
 app.include_router(download_router)
+
+from .semantic import router as semantic_router
+app.include_router(semantic_router)
+from .research import router as research_router
+app.include_router(research_router)
+from .assistant import router as assistant_router
+app.include_router(assistant_router)
+from .writing_drafts import router as writing_router
+app.include_router(writing_router)
+from .research_completion import router as synthesis_router
+app.include_router(synthesis_router)
+
+@app.get('/api/research-model-status')
+def research_model_status():
+    config = settings()
+    return {'configured': bool(config['base_url'] and config['model'])}
+
 
 @asynccontextmanager
 async def stage_lifespan(_app):
@@ -123,6 +144,8 @@ async def stage_lifespan(_app):
     with db() as conn:
         conn.execute("UPDATE document_ingestions SET status='interrupted',error='服务停止，可继续解析' WHERE status IN ('queued','running')")
         conn.execute("UPDATE reference_downloads SET status='interrupted',updated=? WHERE status IN ('queued','running')", (now(),))
+        conn.execute("UPDATE research_tasks SET status='interrupted',error='服务停止，已完成的工具记录保留',updated=? WHERE status IN ('queued','running')", (now(),))
+        conn.execute("UPDATE semantic_indexes SET status='interrupted',error='服务停止，请重新建立索引' WHERE status IN ('queued','running')")
     with LOCK:
         for child in PROCESSES.values():
             if child.poll() is None:
