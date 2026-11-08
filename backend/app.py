@@ -1,3 +1,6 @@
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+import json
 from pathlib import Path
 import sqlite3
 import uuid
@@ -23,6 +26,15 @@ def db():
 
 with db() as conn:
     conn.execute('CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,name TEXT NOT NULL,question TEXT NOT NULL)')
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS repositories(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), name TEXT NOT NULL, url TEXT NOT NULL, revision TEXT NOT NULL, files TEXT NOT NULL, created TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), name TEXT NOT NULL, status TEXT NOT NULL, config TEXT NOT NULL, metrics TEXT NOT NULL DEFAULT '{}', log TEXT NOT NULL DEFAULT '', artifacts TEXT NOT NULL DEFAULT '[]', created TEXT NOT NULL, finished TEXT);
+    CREATE TABLE IF NOT EXISTS datasets(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), name TEXT NOT NULL, filename TEXT NOT NULL, row_count INTEGER NOT NULL, columns TEXT NOT NULL, profile TEXT NOT NULL, created TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS research_notes(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), title TEXT NOT NULL, hypothesis TEXT NOT NULL, prediction TEXT NOT NULL, outcome TEXT NOT NULL, decision TEXT NOT NULL, source_refs TEXT NOT NULL, run_ids TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS experiment_series(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), name TEXT NOT NULL, status TEXT NOT NULL, config TEXT NOT NULL, run_ids TEXT NOT NULL, created TEXT NOT NULL, finished TEXT);
+    """)
+    conn.execute("UPDATE runs SET status='interrupted',finished=? WHERE status IN ('queued','running')", (datetime.now(timezone.utc).isoformat(),))
+    conn.execute("UPDATE experiment_series SET status='interrupted',finished=? WHERE status IN ('queued','running')", (datetime.now(timezone.utc).isoformat(),))
 
 
 class ProjectBody(BaseModel):
@@ -65,9 +77,6 @@ async def local_origin(request, call_next):
     return await call_next(request)
 
 
-from datetime import datetime, timezone
-import json
-from contextlib import asynccontextmanager
 
 def now():
     return datetime.now(timezone.utc).isoformat()
@@ -80,12 +89,19 @@ def project(pid):
     return get_project(pid)
 
 def records(table, pid):
-    if table == 'research_notes':
+    encoded_fields = {
+        'research_notes': ('source_refs', 'run_ids'),
+        'repositories': ('files',),
+        'runs': ('config', 'metrics', 'artifacts'),
+        'datasets': ('columns', 'profile'),
+        'experiment_series': ('config', 'run_ids'),
+    }
+    if table in encoded_fields:
         with db() as conn:
-            return [dict(row) | {'source_refs': json.loads(row['source_refs']), 'run_ids': json.loads(row['run_ids'])}
-                    for row in conn.execute('SELECT * FROM research_notes WHERE project_id=? ORDER BY created DESC', (pid,))]
+            rows = conn.execute(f'SELECT * FROM {table} WHERE project_id=? ORDER BY created DESC,rowid DESC', (pid,))
+            return [dict(row) | {field: json.loads(row[field]) for field in encoded_fields[table]} for row in rows]
     if table != 'documents':
-        raise ValueError('Only documents are available in this publication stage')
+        raise ValueError('Unknown record table')
     from .ingestion import document, decorate
     with db() as conn:
         ids = [row[0] for row in conn.execute('SELECT id FROM documents WHERE project_id=? ORDER BY rowid DESC', (pid,))]
@@ -119,6 +135,13 @@ app.include_router(download_router)
 
 from .semantic import router as semantic_router
 app.include_router(semantic_router)
+from .experiments import (
+    router as experiments_router, RunBody, run_record, get_run, execute_run, cancel_run,
+    docker_available, repository_run, run_update, PROCESS_LOCK, stop_runs,
+)
+app.include_router(experiments_router)
+from .studio import router as analysis_router
+app.include_router(analysis_router)
 from .research import router as research_router
 app.include_router(research_router)
 from .assistant import router as assistant_router
@@ -141,6 +164,7 @@ async def stage_lifespan(_app):
     stop = start_scheduler()
     yield
     stop.set()
+    stop_runs()
     with db() as conn:
         conn.execute("UPDATE document_ingestions SET status='interrupted',error='服务停止，可继续解析' WHERE status IN ('queued','running')")
         conn.execute("UPDATE reference_downloads SET status='interrupted',updated=? WHERE status IN ('queued','running')", (now(),))
