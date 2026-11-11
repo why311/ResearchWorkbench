@@ -2,15 +2,80 @@
 import json
 import os
 import re
+from tempfile import NamedTemporaryFile
+from threading import Lock
+from urllib.parse import urlsplit
 
 import httpx
-from fastapi import HTTPException
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
+
+router = APIRouter(prefix='/api/settings')
+WRITE_LOCK = Lock()
 
 
 def settings():
-    return {"base_url": os.environ.get("RESEARCH_MODEL_URL", ""),
-            "model": os.environ.get("RESEARCH_MODEL_NAME", ""),
-            "api_key": os.environ.get("RESEARCH_MODEL_KEY", "")}
+    from .app import DATA
+
+    path = DATA / 'model.json'
+    saved = json.loads(path.read_text(encoding='utf-8')) if path.is_file() else {}
+    return {'base_url': saved.get('base_url', os.environ.get('RESEARCH_MODEL_URL', '')),
+            'model': saved.get('model', os.environ.get('RESEARCH_MODEL_NAME', '')),
+            'api_key': saved.get('api_key', os.environ.get('RESEARCH_MODEL_KEY', ''))}
+
+
+class ModelSettings(BaseModel):
+    base_url: str = Field(default='', max_length=1000)
+    model: str = Field(default='', max_length=200)
+    api_key: str = Field(default='', max_length=4096)
+    clear_key: bool = False
+
+
+@router.get('')
+def get_settings():
+    value = settings()
+    return {'base_url': value['base_url'], 'model': value['model'], 'has_key': bool(value['api_key'])}
+
+
+@router.put('')
+def save_settings(body: ModelSettings):
+    from pathlib import Path
+    from .app import DATA
+
+    url = body.base_url.strip().rstrip('/')
+    try:
+        target = urlsplit(url)
+        _ = target.port
+        if url and (target.scheme not in {'http', 'https'} or not target.hostname
+                    or target.username is not None or target.query or target.fragment):
+            raise ValueError()
+    except ValueError as exc:
+        raise HTTPException(422, '请输入 HTTP 或 HTTPS 基础地址，地址中不能包含账号、查询参数或片段') from exc
+    value = {'base_url': url, 'model': body.model.strip(), 'api_key': body.api_key.strip()}
+    with WRITE_LOCK:
+        previous = settings()
+        if body.clear_key:
+            value['api_key'] = ''
+        elif not value['api_key'] and url and previous['base_url'].rstrip('/') == url:
+            value['api_key'] = previous['api_key']
+        temporary = None
+        try:
+            with NamedTemporaryFile(dir=DATA, mode='w', encoding='utf-8', delete=False) as stream:
+                temporary = Path(stream.name)
+                json.dump(value, stream, ensure_ascii=False)
+            temporary.replace(DATA / 'model.json')
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+    return get_settings()
+
+
+@router.post('/test')
+def test_settings():
+    result = model_json('返回 {"ok":true}', '连接测试。')
+    if result is None:
+        raise HTTPException(409, '请先保存模型地址和名称')
+    return {'ok': result.get('ok') is True}
 
 
 def model_json(instruction: str, material: str, image: bytes | None = None):

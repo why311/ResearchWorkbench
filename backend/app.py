@@ -1,20 +1,37 @@
+import base64
+import binascii
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
+import secrets
 import sqlite3
 import uuid
 from urllib.parse import urlparse
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parents[1]
-DATA = ROOT / 'data'
-DATA.mkdir(exist_ok=True)
+DATA = Path(os.environ.get('RESEARCH_DATA_DIR') or ROOT / 'data').resolve()
+DATA.mkdir(parents=True, exist_ok=True)
 app = FastAPI(title='研舟 · 科研工作台')
+
+try:
+    AUTH_USERS = json.loads(os.environ.get('RESEARCH_USERS', '{}'))
+    if not isinstance(AUTH_USERS, dict) or any(
+        not name or ':' in name or not isinstance(password, str) or len(password) < 16
+        for name, password in AUTH_USERS.items()
+    ):
+        raise ValueError()
+except (ValueError, TypeError):
+    raise ValueError('RESEARCH_USERS 须为用户名到至少 16 字符密码的 JSON 对象') from None
+
+ADMIN_USER = next(iter(AUTH_USERS), None)
+ALLOWED_ORIGINS = {origin.strip() for origin in os.environ.get('RESEARCH_ALLOWED_ORIGINS', '').split(',') if origin.strip()}
 
 
 def db():
@@ -32,7 +49,11 @@ with db() as conn:
     CREATE TABLE IF NOT EXISTS datasets(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), name TEXT NOT NULL, filename TEXT NOT NULL, row_count INTEGER NOT NULL, columns TEXT NOT NULL, profile TEXT NOT NULL, created TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS research_notes(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), title TEXT NOT NULL, hypothesis TEXT NOT NULL, prediction TEXT NOT NULL, outcome TEXT NOT NULL, decision TEXT NOT NULL, source_refs TEXT NOT NULL, run_ids TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS experiment_series(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), name TEXT NOT NULL, status TEXT NOT NULL, config TEXT NOT NULL, run_ids TEXT NOT NULL, created TEXT NOT NULL, finished TEXT);
+    CREATE TABLE IF NOT EXISTS reports(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), title TEXT NOT NULL, template TEXT NOT NULL, bindings TEXT NOT NULL, chart_run_ids TEXT NOT NULL, chart_metrics TEXT NOT NULL, generated TEXT NOT NULL DEFAULT '{}', created TEXT NOT NULL, updated TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS project_owners(project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE, username TEXT NOT NULL);
     """)
+    if 'citations' not in {row['name'] for row in conn.execute('PRAGMA table_info(reports)')}:
+        conn.execute("ALTER TABLE reports ADD COLUMN citations TEXT NOT NULL DEFAULT '[]'")
     conn.execute("UPDATE runs SET status='interrupted',finished=? WHERE status IN ('queued','running')", (datetime.now(timezone.utc).isoformat(),))
     conn.execute("UPDATE experiment_series SET status='interrupted',finished=? WHERE status IN ('queued','running')", (datetime.now(timezone.utc).isoformat(),))
 
@@ -48,33 +69,73 @@ def health():
 
 
 @app.get('/api/projects')
-def projects():
+def projects(request: Request):
     with db() as conn:
+        if AUTH_USERS:
+            return [dict(row) for row in conn.execute('''
+                SELECT p.* FROM projects p LEFT JOIN project_owners o ON o.project_id=p.id
+                WHERE o.username=? OR (? AND o.project_id IS NULL) ORDER BY p.rowid DESC
+                ''', (request.state.username, request.state.administrator))]
         return [dict(row) for row in conn.execute('SELECT * FROM projects ORDER BY rowid DESC')]
 
 
 @app.post('/api/projects')
-def create_project(body: ProjectBody):
-    from fastapi import HTTPException
+def create_project(body: ProjectBody, request: Request):
     if not body.name.strip():
         raise HTTPException(422, '请填写项目名称')
     value = {'id': uuid.uuid4().hex, 'name': body.name.strip(), 'question': body.question.strip()}
     with db() as conn:
         conn.execute('INSERT INTO projects VALUES (?,?,?)', tuple(value.values()))
+        if AUTH_USERS:
+            conn.execute('INSERT INTO project_owners VALUES (?,?)', (value['id'], request.state.username))
     return value
 
 
 @app.middleware('http')
-async def local_origin(request, call_next):
+async def local_origin(request: Request, call_next):
     origin = request.headers.get('origin')
     try:
         parsed = urlparse(origin) if origin else None
-        allowed = not parsed or (parsed.scheme == 'http' and parsed.hostname in {'127.0.0.1', 'localhost'} and (parsed.netloc == request.url.netloc or parsed.port == 5178))
+        allowed = not parsed or origin in ALLOWED_ORIGINS or (
+            parsed.scheme == 'http' and parsed.hostname in {'127.0.0.1', 'localhost'}
+            and (parsed.netloc == request.url.netloc or parsed.port == 5178)
+        )
     except ValueError:
         allowed = False
     if not allowed:
         return JSONResponse({'detail': '仅允许本机工作台页面访问'}, status_code=403)
+    request.state.username = None
+    request.state.administrator = True
+    if AUTH_USERS:
+        try:
+            scheme, encoded = request.headers.get('authorization', '').split(' ', 1)
+            if scheme.lower() != 'basic':
+                raise ValueError()
+            username, password = base64.b64decode(encoded, validate=True).decode('utf-8').split(':', 1)
+            expected = AUTH_USERS.get(username)
+            if expected is None or not secrets.compare_digest(password.encode(), expected.encode()):
+                raise ValueError()
+        except (ValueError, UnicodeError, binascii.Error):
+            return JSONResponse({'detail': '请使用分配的账号登录'}, status_code=401,
+                                headers={'WWW-Authenticate': 'Basic realm="ResearchWorkbench", charset="UTF-8"'})
+        administrator = username == ADMIN_USER
+        request.state.username = username
+        request.state.administrator = administrator
+        path = request.url.path.rstrip('/')
+        if not administrator and (path == '/api/settings' or path.startswith('/api/settings/') or path == '/api/runtime/prepare'):
+            return JSONResponse({'detail': '此操作需要维护者账号'}, status_code=403)
+        parts = path.split('/')
+        if len(parts) >= 4 and parts[1:3] == ['api', 'projects']:
+            with db() as conn:
+                project_owner = conn.execute('SELECT username FROM project_owners WHERE project_id=?', (parts[3],)).fetchone()
+            if (project_owner and project_owner['username'] != username) or (not project_owner and not administrator):
+                return JSONResponse({'detail': '项目不存在'}, status_code=404)
     return await call_next(request)
+
+
+@app.get('/api/session')
+def session(request: Request):
+    return {'username': request.state.username, 'administrator': request.state.administrator}
 
 
 
@@ -93,6 +154,7 @@ def records(table, pid):
         'research_notes': ('source_refs', 'run_ids'),
         'repositories': ('files',),
         'runs': ('config', 'metrics', 'artifacts'),
+        'reports': ('bindings', 'citations', 'chart_run_ids', 'chart_metrics', 'generated'),
         'datasets': ('columns', 'profile'),
         'experiment_series': ('config', 'run_ids'),
     }
@@ -107,7 +169,8 @@ def records(table, pid):
         ids = [row[0] for row in conn.execute('SELECT id FROM documents WHERE project_id=? ORDER BY rowid DESC', (pid,))]
     return [decorate(document(pid, did)) for did in ids]
 
-from .model import model_json, settings
+from .model import router as settings_router, model_json, settings
+app.include_router(settings_router)
 
 from .documents import router as documents_router
 app.include_router(documents_router)

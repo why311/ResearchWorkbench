@@ -52,7 +52,12 @@ def resolve_note(pid, note):
             raise HTTPException(422, '文献片段不属于当前项目或已失效')
         sources.append({**ref, 'title': document['title'], 'page': span['page'], 'text': span['text']})
     runs = [core.run_record(pid, rid) for rid in note['run_ids']]
+    from .studio import get_report
     linked_reports = []
+    for report in core.records('reports', pid):
+        refs = set(report['chart_run_ids']) | {binding['run_id'] for binding in report['bindings']}
+        if refs.intersection(note['run_ids']):
+            linked_reports.append(get_report(pid, report['id']))
     gaps = []
     if not sources:
         gaps.append('尚未关联原文片段')

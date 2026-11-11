@@ -98,7 +98,7 @@ function WritingDrafts({ project, busy, action, source }: ModuleProps & { source
   </div>;
 }
 
-export default function ResearchWorkspace({ project, source }: { project: ModuleProps['project']; source: Source }) {
+export default function ResearchWorkspace({ project, source, modelRevision }: { project: ModuleProps['project']; source: Source; modelRevision: number }) {
   const [tab, setTab] = useState<Tab>('semantic');
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
@@ -110,7 +110,7 @@ export default function ResearchWorkspace({ project, source }: { project: Module
     api('/research-model-status').then(result => { if (live) setConfigured(result.configured); })
       .catch(err => { if (live) setError(err.message); });
     return () => { live = false; };
-  }, []);
+  }, [modelRevision]);
 
   const action: ModuleProps['action'] = async (key, task, success) => {
     setBusy(key);

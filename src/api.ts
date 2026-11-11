@@ -31,3 +31,12 @@ export type ExperimentRecords = {
   research_notes: { id: string; title: string }[];
 };
 export type ExperimentProps = Omit<ModuleProps, 'project'> & { project: ModuleProps['project'] & ExperimentRecords };
+
+export type SourcePage = { items: Span[]; page: number; pages: number; total: number; offset: number; has_more: boolean; details: { width: number; height: number; method: string; columns: number; figures: { bbox: number[] }[]; tables: { bbox: number[]; rows: (string | null)[][] }[] } | null };
+export type Binding = { alias: string; run_id: string; metric: string; precision: number; display: 'number' | 'percent' };
+export type Citation = { alias: string; document_id: string; span_id: string };
+export type ReportForm = { citations: Citation[]; title: string; template: string; bindings: Binding[]; chart_run_ids: string[]; chart_metrics: string[] };
+export type Report = ReportForm & { id: string; preview: string; sync_status: string; errors: string[]; changes: { alias: string; before: string; after: string; source_changed: boolean }[]; generated: { id?: string; version?: number; created?: string; files?: string[] } };
+export type DeliveryProps = Omit<ModuleProps, 'project'> & {
+  project: ModuleProps['project'] & { name: string; runs: Run[]; reports: { id: string; title: string }[] };
+};
