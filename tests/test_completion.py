@@ -4,10 +4,11 @@ from concurrent.futures import Future
 
 from docx import Document
 from docx.shared import Cm, Pt
-from fastapi.responses import Response
 
 from backend import app as core, literature, research_completion as completion
 from backend.analysis_runner import analyze
+from backend.scan_tables import scanned_tables
+from backend.streaming import checked_answer
 from tests.test_workbench import client, create
 
 
@@ -52,6 +53,20 @@ def test_numbered_references_ranges_and_multiple_entries(client):
     assert data['unmatched'][0]['number']==99
 
 
+def test_author_year_citation_across_line_break_links_back(client):
+    pid = create(client)
+    doc = core.add_document(pid, 'Author-year', 'refs.txt', 2, [
+        {'id': 'p1-s1', 'page': 1, 'text': 'Prior work by Hinton et al.\n(2006) reported an improvement.'},
+        {'id': 'p2-s1', 'page': 2, 'text': 'References'},
+        {'id': 'p2-s2', 'page': 2, 'text': 'Geoffrey E. Hinton, Simon Osindero, and Yee Whye Teh. A fast learning algorithm. Neural Computation, 2006.'},
+    ])
+    result = client.get(f'/api/projects/{pid}/documents/{doc["id"]}/citation-map').json()
+    mention, = result['mentions']
+    assert mention['label'] == 'Hinton et al.\n(2006)'
+    assert mention['reference_span_id'] == 'p2-s2'
+    assert result['references'][0]['backlinks'] == [mention]
+
+
 def test_translation_selection_and_resume_preserve_manual_text(client,monkeypatch):
     pid=create(client); doc=add(pid)
     base=f'/api/projects/{pid}/documents/{doc["id"]}'
@@ -94,11 +109,89 @@ def test_translation_cannot_resume_until_cancelled_request_finishes(client,monke
     replacement.set_result(None)
 
 
+def test_translation_retries_failed_span_and_continues_later_pages(client, monkeypatch):
+    pid = create(client)
+    doc = core.add_document(pid, 'Translation retry', 'retry.txt', 2, [
+        {'id': 'p1-s1', 'page': 1, 'text': 'Translate $x^2$ faithfully.'},
+        {'id': 'p1-s2', 'page': 1, 'text': 'A persistently invalid response.'},
+        {'id': 'p2-s1', 'page': 2, 'text': 'Translate the later page.'},
+    ])
+    calls = []
+    def model(_instruction, material):
+        requested = json.loads(material)
+        ids = [r['span_id'] for r in requested]
+        calls.append(ids)
+        return {'translations': [{**r, 'translation': r['source']} for r in requested
+                                 if r['span_id'] != 'p1-s2' and len(ids) == 1]}
+    monkeypatch.setattr(core, 'model_json', model)
+    monkeypatch.setattr(core, 'settings', lambda: {'base_url': 'http://fixture', 'model': 'fixture', 'api_key': ''})
+    pending = Future()
+    monkeypatch.setattr(literature.TRANSLATION_POOL, 'submit', lambda *_: pending)
+    base = f"/api/projects/{pid}/documents/{doc['id']}"
+    body = {'start_page': 1, 'end_page': 2}
+    assert client.post(base + '/translation-job', json=body).status_code == 200
+    literature.run_translation(pid, doc['id'], literature.FullTranslateBody(**body))
+    pending.set_result(None)
+    state = client.get(base + '/translation-job').json()
+    assert state['status'] == 'failed' and state['completed'] == 2 and 'p1-s2' in state['error']
+    assert calls == [['p1-s1', 'p1-s2'], ['p1-s1', 'p1-s2'], ['p1-s1'], ['p1-s2'], ['p2-s1']]
+    assert '$x^2$' in client.get(base + '/translations').json()['items'][0]['translation']['text']
+    assert client.get(base + '/translations?page=2').json()['items'][0]['translation']
+
+
+def test_translation_fragment_retry_preserves_source_anchor_and_formula(client, monkeypatch):
+    pid = create(client)
+    source = '多语言数据用来评估模型的不同表现。' * 5 + '使用标注数据等\n等。' + '比较 $x^2$ 对不同实验组的影响。' * 5
+    doc = core.add_document(pid, 'Translation fragments', 'fragments.txt', 1, [
+        {'id': 'p1-s1', 'page': 1, 'text': source}])
+    span = {'id': 'p1-s1', 'text': source}
+
+    def model(_instruction, material):
+        chunks = json.loads(material)
+        assert len(chunks) == 2 and '等\n等' not in ''.join(row['source'] for row in chunks)
+        return {'translations': [{**row, 'translation': row['source']} for row in chunks]}
+
+    monkeypatch.setattr(core, 'model_json', model)
+    saved = literature.translate_batch(pid, doc['id'], 'en', [span], split=True)
+    assert list(saved) == ['p1-s1'] and saved['p1-s1'].count('$x^2$') == 5
+    path = f'/api/projects/{pid}/documents/{doc["id"]}/translations?language=en'
+    item, = client.get(path).json()['items']
+    assert item['text'] == source and item['translation']['span_id'] == 'p1-s1'
+
+
+def test_scan_table_keeps_empty_cells_and_values_spanning_two_columns():
+    blocks = []
+    for y, values in [
+        (10, [(100, 405, 'Table 2: Benchmark results')]),
+        (30, [(110, 140, 'Model'), (280, 310, 'Score'), (330, 365, 'Cost A'), (388, 424, 'Cost B')]),
+        (42, [(110, 145, 'First'), (283, 308, '12.3'), (390, 425, '1.0·1020')]),
+        (54, [(111, 145, 'Second'), (281, 309, '28.4'), (334, 366, '4.5'), (390, 425, '6.0')]),
+        (66, [(110, 144, 'Third'), (283, 310, '41.0'), (347, 407, '2.3·1019')]),
+    ]:
+        blocks.extend({'text': text, 'bbox': [left, y, right, y + 10], 'confidence': .95}
+                      for left, right, text in values)
+    table, = scanned_tables(blocks)
+    assert table['rows'][1] == ['First', '12.3', None, '1.0 × 10^20']
+    assert table['rows'][3] == ['Third', '41.0', None, None]
+    assert table['merged_cells'] == [{'row': 3, 'first_column': 2, 'last_column': 3, 'text': '2.3 × 10^19'}]
+
+
+def test_multiple_rows_can_be_verified_against_one_table_anchor():
+    passage = {'citation': 'paper:p4-s7', 'text': '117M 12 768\n345M 24 1024\n762M 36 1280\n1542M 48 1600'}
+    claim = {'text': 'The four model sizes are 117M, 345M, 762M and 1542M.',
+             'citations': [passage['citation']], 'quotes': passage['text'].splitlines()}
+    assert checked_answer({'claims': [claim]}, [passage])['claims'][0]['citations'] == [passage['citation']]
+    claim['quotes'][2] = '762M 34 1280'
+    assert not checked_answer({'claims': [claim]}, [passage])['claims']
+
+
 def test_review_rejects_untraceable_claims_and_timeline_dates(client,monkeypatch):
     pid,foreign=create(client),create(client); doc=add(pid); secret=add(foreign)
     base=f'/api/projects/{pid}'
     def model(_instruction,material):
-        rows=json.loads(material); s=rows[0]
+        payload = json.loads(material)
+        assert payload['local_citation_topology']['edges'] == []
+        s = payload['evidence'][0]
         return {'claims':[{'section':'method','text':'A bounded statement.','citation':s['citation'],'quote':s['text']},
                           {'section':'method','text':'Invented.','citation':'foreign:p1','quote':'absent'}], 'gaps':['Need external validation.']}
     monkeypatch.setattr(core,'model_json',model)
@@ -128,7 +221,7 @@ def test_diagram_filters_unknown_edges_and_encodes_labels(client,monkeypatch):
 
 def test_page_model_notes_never_replace_original(client,monkeypatch):
     pid=create(client); doc=add(pid)
-    monkeypatch.setattr(completion,'page_image',lambda *_:Response(b'PNG fixture',media_type='image/png'))
+    monkeypatch.setattr(completion, 'render_page_png', lambda *_, **__: b'PNG fixture')
     monkeypatch.setattr(core,'model_json',lambda *args,**kwargs:{'summary':'Model interpretation','formulas':[{'latex':'x^2','uncertain':True}]})
     base=f'/api/projects/{pid}/documents/{doc["id"]}'
     assert client.post(base+'/interpret-page',json={'page':1}).json()['result']['reviewed'] is False

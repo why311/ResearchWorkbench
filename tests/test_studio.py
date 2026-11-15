@@ -61,7 +61,8 @@ def test_analysis_numbers_and_exported_replay(client, tmp_path):
     assert client.post(f'/api/projects/{other}/datasets/from-run', json={'run_id': rid, 'filename': 'cleaned.csv'}).status_code == 404
     exported = client.get(f'/api/projects/{pid}/analysis/{rid}/export')
     archive = zipfile.ZipFile(io.BytesIO(exported.content))
-    assert {'analysis_runner.py', 'input.csv', 'config.json', 'environment.json', 'analysis.md'}.issubset(archive.namelist())
+    assert {'analysis_runner.py', 'input.csv', 'config.json', 'environment.json', 'analysis.md',
+            'summary-count.tex', 'summary-count.mmd'}.issubset(archive.namelist())
     for name in archive.namelist():
         (tmp_path / name).write_bytes(archive.read(name))
     process = subprocess.run([sys.executable, str(tmp_path / 'analysis_runner.py'), '--input', str(tmp_path / 'input.csv'), '--plan', str(tmp_path / 'config.json'), '--output', str(tmp_path / 'replay')], capture_output=True, timeout=30)

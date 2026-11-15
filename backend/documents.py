@@ -1,5 +1,6 @@
 """Structured ingestion, page storage and source-aware document access."""
 from concurrent.futures import ThreadPoolExecutor
+from difflib import SequenceMatcher
 import io
 import json
 from pathlib import Path
@@ -101,8 +102,13 @@ def stop_process(proc):
 def profile_for(doc, metadata):
     blocks = list(spans(doc))
     sample = '\n'.join(s['text'] for s in blocks)[:80000]
-    doi = re.search(r'10\.\d{4,9}/[-._;()/:A-Z0-9]+', sample[:16000], re.I)
-    arxiv = re.search(r'(?:arxiv\s*:\s*|arxiv.org/(?:abs|pdf)/)(\d{4}\.\d{4,5})(?:v(\d+))?', '\n'.join(s['text'] for s in blocks if s['page']==1), re.I)
+    front = [s for s in blocks if s['page'] == 1]
+    front_text = '\n'.join(s['text'] for s in front)
+    doi = re.search(r'10\.\d{4,9}/[-._;()/:A-Z0-9]+', front_text[:4000], re.I)
+    arxiv = re.search(r'(?:arxiv\s*:\s*|arxiv\.org/(?:abs|pdf)/)(\d{4}\.\d{4,5})(?:v(\d+))?', front_text, re.I)
+    file_version = re.fullmatch(r'(\d{4}\.\d{4,5})v(\d+)(?:[_ -].*)?\.pdf', doc['filename'], re.I)
+    version = int(arxiv[2]) if arxiv and arxiv[2] else int(file_version[2]) if file_version and arxiv and file_version[1] == arxiv[1] else None
+    year = str(2000 + int(arxiv[1][:2])) if arxiv and 1 <= int(arxiv[1][2:4]) <= 12 else ''
     headings = [{'text': s['text'], 'span_id': s['id'], 'page': s['page'], 'level': s.get('level', 1)} for s in blocks if s.get('kind') == 'heading']
     title = metadata.get('Title', '').strip()
     if not title or title.lower().endswith(('.docx', '.tex')):
@@ -111,28 +117,80 @@ def profile_for(doc, metadata):
         sizes = [s.get('font_size',0) for s in candidates]
         largest = max(sizes, default=0)
         prominent = [s for s in candidates if largest and s.get('font_size',0)>=largest*.95]
-        title = ' '.join(s['text'] for s in prominent[:3]) if prominent else next((s['text'] for s in candidates if s.get('kind')=='heading'), doc['title'])
+        title_parts = []
+        for span in prominent:
+            if title_parts and span['bbox'][1] - title_parts[-1]['bbox'][3] > largest * 1.5:
+                break
+            title_parts.append(span)
+            if len(title_parts) == 3:
+                break
+        title = ' '.join(s['text'] for s in title_parts) if title_parts else next((s['text'] for s in candidates if s.get('kind')=='heading'), doc['title'])
+    abstract, author_region = [], front[:12]
+    for index, span in enumerate(front):
+        marker = re.match(r'^\s*(?:Abstract|摘要)(?=$|[.\s:：—–-])\s*[.\s:：—–-]*', span['text'], re.I)
+        if marker:
+            author_region = front[:index]
+            if span['text'][marker.end():].strip():
+                abstract.append({'span_id': span['id'], 'text': span['text'][marker.end():]})
+            for following in front[index + 1:]:
+                if following['kind'] == 'heading' or re.match(r'^\s*(?:index terms|keywords|关键词)\b', following['text'], re.I):
+                    break
+                abstract.append({'span_id': following['id'], 'text': following['text']})
+                if sum(len(item['text']) for item in abstract) >= 5000:
+                    break
+            break
+    institutions = []
+    for span in author_region:
+        for line in span['text'].splitlines():
+            if re.search(r'\b(?:universit\w+|laborator\w+|research institute|polytechnic|college|school of|department of|academy)\b|大学|研究所|实验室|学院', line, re.I):
+                institutions.append({'span_id': span['id'], 'text': line})
     result = {'title': title[:300], 'author': metadata.get('Author', ''), 'doi': doi[0].rstrip('.,;)') if doi else '',
-        'arxiv': arxiv[1] if arxiv else '', 'version': int(arxiv[2]) if arxiv and arxiv[2] else None,
-        'heading_count': len(headings), 'headings': headings, 'characters': sum(len(s['text']) for s in blocks),
+        'arxiv': arxiv[1] if arxiv else '', 'version': version, 'year': year, 'affiliations': institutions[:20],
+        'heading_count': len(headings), 'headings': headings, 'abstract': abstract,
+        'appendices': [h for h in headings if re.match(r'^(?:[A-Z]\.?\s+)?(?:appendix|appendices|附录)', h['text'], re.I)],
+        'characters': sum(len(s['text']) for s in blocks),
         'formula_candidates': sum(bool(s.get('formula_candidate')) for s in blocks), 'duplicates': []}
     # Content similarity is a suggestion, never an automatic merge or replacement.
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.metrics.pairwise import cosine_similarity
     others = [d for d in core.records('documents', doc['project_id']) if d['id'] != doc['id']]
-    texts = [sample[:40000]] + ['\n'.join(s['text'] for s in spans(d))[:40000] for d in others]
+    from itertools import islice
+    texts = [sample[:40000]] + ['\n'.join(s['text'] for s in islice(spans(d), 400))[:40000] for d in others]
     if len(texts) > 1 and sample.strip():
         try:
             vectors = TfidfVectorizer(analyzer='char', ngram_range=(3, 5), max_features=20000).fit_transform(texts)
             scores = cosine_similarity(vectors[:1], vectors[1:])[0]
-            for other, score in zip(others, scores):
+            short_list = sorted((i for i, score in enumerate(scores) if score >= .25), key=lambda i: scores[i], reverse=True)[:8]
+            from .semantic import semantic_front_similarity
+            dense = dict(zip(short_list, semantic_front_similarity(texts[0], [texts[i + 1] for i in short_list])))
+            for i, (other, score) in enumerate(zip(others, scores)):
                 old = other.get('ingestion', {}).get('profile', {})
                 same_id = bool(result['doi'] and result['doi'].lower() == old.get('doi', '').lower() or result['arxiv'] and result['arxiv'] == old.get('arxiv'))
-                if score >= .82 or same_id:
-                    newer = result['version'] is not None and old.get('version') is not None and old['version'] > result['version']
+                semantic_score = dense.get(i)
+                if score >= .82 or same_id or (score >= .45 and semantic_score is not None and semantic_score >= .94):
+                    current_version, existing_version = result['version'], old.get('version')
+                    version_hint = False
+                    if (current_version is None or existing_version is None) and file_version and score >= .82:
+                        old_file = re.fullmatch(r'(\d{4}\.\d{4,5})v(\d+)(?:[_ -].*)?\.pdf', other['filename'], re.I)
+                        if old_file and old_file[1] == file_version[1]:
+                            current_version = current_version if current_version is not None else int(file_version[2])
+                            existing_version = existing_version if existing_version is not None else int(old_file[2])
+                            version_hint = True
+                    preferred = None
+                    if existing_version is not None and current_version is not None and current_version != existing_version:
+                        preferred = other['id'] if existing_version > current_version else doc['id']
+                    before, after = (texts[0], texts[i + 1]) if preferred == other['id'] else (texts[i + 1], texts[0])
+                    operations = SequenceMatcher(None, before.splitlines(), after.splitlines(), autojunk=True).get_opcodes()
+                    diffs = {tag: sum(j - a if tag == 'delete' else end - b for t, a, j, b, end in operations if t == tag)
+                             for tag in ('insert', 'delete', 'replace')}
+                    suggestion = ('库中版本更新，建议优先使用库内已有版本。' if preferred == other['id'] else
+                                  '新导入文件版本较新，建议优先使用。' if preferred else '正文相近，请核对修订关系。')
+                    if preferred and version_hint:
+                        suggestion += '正文已匹配，版本号部分取自文件名。'
                     result['duplicates'].append({'document_id': other['id'], 'title': other['title'], 'similarity': round(float(score), 3),
-                        'same_identifier': same_id, 'existing_version': old.get('version'), 'suggestion': '库中版本更新，建议保留已有版本；新文件暂时并存。' if newer else '内容相近，建议核对是否同一论文或修订版本；两个文件均已保留。',
-                        'scope': '正文前40000字符的三至五字片段相似度，不是完整版本差异审计。'})
+                        'same_identifier': same_id, 'existing_version': existing_version, 'current_version': current_version,
+                        'preferred_id': preferred, 'semantic_similarity': semantic_score, 'difference': diffs,
+                        'suggestion': suggestion, 'scope': '比较正文前40000字符；完整段落对照可在文献整理中查看。'})
         except ValueError:
             pass
     return result
@@ -240,6 +298,10 @@ def parse_job(pid, jid):
 
 @router.post('/projects/{pid}/document-ingestions')
 async def ingest(pid: str, file: UploadFile = File(...)):
+    return await enqueue_pdf(pid, file)
+
+
+async def enqueue_pdf(pid, file, source_metadata=None):
     core.project(pid)
     content = await file.read(32 * 1024 * 1024 + 1)
     if len(content) > 32 * 1024 * 1024:
@@ -259,17 +321,30 @@ async def ingest(pid: str, file: UploadFile = File(...)):
     if not 1 <= total <= 2000:
         raise HTTPException(422, '结构化解析支持1—2000页，按页处理并限制运行资源')
     did, jid, created = core.uid(), core.uid(), core.now()
+    title = source_metadata['title'][:300] if source_metadata else Path(filename).stem
     with core.db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         if conn.execute("SELECT COUNT(*) FROM document_ingestions WHERE status IN ('queued','running')").fetchone()[0] >= 6:
             raise HTTPException(429, '已有6份文献等待解析，请等待或停止其中的任务')
-        conn.execute('INSERT INTO documents VALUES (?,?,?,?,?,?,?,?)', (did, pid, Path(filename).stem, filename, total, '[]', '{}', created))
-        conn.execute('INSERT INTO document_ingestions VALUES (?,?,?,?,?,?,?,?,?,?)', (jid, pid, did, 'queued', 0, total, '{}', '', created, created))
+        conn.execute('INSERT INTO documents VALUES (?,?,?,?,?,?,?,?)', (did, pid, title, filename, total, '[]', '{}', created))
+        initial_profile = json.dumps({'metadata_source': source_metadata}, ensure_ascii=False) if source_metadata else '{}'
+        conn.execute('INSERT INTO document_ingestions VALUES (?,?,?,?,?,?,?,?,?,?)', (jid, pid, did, 'queued', 0, total, initial_profile, '', created, created))
     original = core.DATA / 'documents' / did
     original.mkdir(parents=True, exist_ok=True)
     (original / 'original.pdf').write_bytes(content)
     POOL.submit(parse_job, pid, jid)
     return job(pid, jid)
+
+
+@router.post('/projects/{pid}/documents/{did}/reparse')
+async def reparse(pid: str, did: str):
+    doc = decorate(document(pid, did))
+    original = core.DATA / 'documents' / did / 'original.pdf'
+    if not doc['filename'].lower().endswith('.pdf') or not original.is_file():
+        raise HTTPException(404, '找不到可重新解析的原始PDF')
+    with original.open('rb') as stream:
+        return await enqueue_pdf(pid, UploadFile(stream, filename=doc['filename']),
+                                 doc.get('ingestion', {}).get('profile', {}).get('metadata_source'))
 
 
 @router.get('/projects/{pid}/document-ingestions')
@@ -315,14 +390,18 @@ def resume_job(pid: str, jid: str):
 def get_spans(pid: str, did: str, page: int = Query(default=1, ge=1), anchor: str = '', limit: int = Query(default=200, ge=1, le=300), offset: int = Query(default=0, ge=0)):
     doc = document(pid, did)
     if anchor:
-        found = next((s for s in spans(doc) if s['id'] == anchor), None)
-        if not found:
-            raise HTTPException(404, '原文片段不存在')
-        page = found['page']
         with core.db() as conn:
-            position = conn.execute('SELECT ordinal FROM document_blocks WHERE document_id=? AND span_id=?', (did, anchor)).fetchone()
+            position = conn.execute('SELECT page,ordinal FROM document_blocks WHERE document_id=? AND span_id=?', (did, anchor)).fetchone()
         if position:
+            page = position['page']
             offset = position['ordinal'] // limit * limit
+        else:
+            found = next((s for s in doc['spans'] if s['id'] == anchor), None)
+            if not found:
+                raise HTTPException(404, '原文片段不存在')
+            page = found['page']
+            index = next(i for i, item in enumerate((s for s in doc['spans'] if s['page'] == page)) if item['id'] == anchor)
+            offset = index // limit * limit
     if page > doc['pages']:
         raise HTTPException(422, '页码超过文献范围')
     with core.db() as conn:
@@ -340,6 +419,11 @@ def get_spans(pid: str, did: str, page: int = Query(default=1, ge=1), anchor: st
 
 @router.get('/projects/{pid}/documents/{did}/page-image/{page}')
 def page_image(pid: str, did: str, page: int):
+    image = render_page_png(pid, did, page)
+    return Response(image, media_type='image/png', headers={'Cache-Control': 'private, max-age=300'})
+
+
+def render_page_png(pid: str, did: str, page: int, max_scale=1.5, max_dimension=1600):
     doc = document(pid, did)
     if not 1 <= page <= doc['pages'] or not doc['filename'].lower().endswith('.pdf'):
         raise HTTPException(422, '请选择PDF的有效页码')
@@ -350,11 +434,11 @@ def page_image(pid: str, did: str, page: int):
     import pypdfium2 as pdfium
     with pdfium.PdfDocument(original) as pdf:
         pdf_page = pdf[page - 1]
-        bitmap = pdf_page.render(scale=min(1.5, 1600 / max(pdf_page.get_size())))
+        bitmap = pdf_page.render(scale=min(max_scale, max_dimension / max(pdf_page.get_size())))
         image = bitmap.to_pil()
         memory = io.BytesIO()
         image.save(memory, format='PNG')
         image.close()
         bitmap.close()
         pdf_page.close()
-    return Response(memory.getvalue(), media_type='image/png', headers={'Cache-Control': 'private, max-age=300'})
+    return memory.getvalue()

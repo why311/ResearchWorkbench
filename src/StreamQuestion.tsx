@@ -3,7 +3,8 @@ import { BookOpen, Search, Square } from 'lucide-react';
 import type { Answer, Evidence } from './api';
 
 export default function StreamQuestion({projectId, documents, question, disabled, onAnswer, cite}:{projectId:string;documents:{id:string;title:string;filename?:string}[];question:string;disabled:boolean;onAnswer:(a:Answer)=>void;cite:(id:string)=>void}) {
-  const [selected,setSelected]=useState('');
+  const [selected, setSelected] = useState<string[]>([]);
+  const scope = selected.filter(id => documents.some(doc => doc.id === id));
   const [value,setValue]=useState(question), [phase,setPhase]=useState(''), [draft,setDraft]=useState(''), [error,setError]=useState('');
   const [answer,setAnswer]=useState<Answer|null>(null);
   const controller=useRef<AbortController|null>(null);
@@ -16,7 +17,7 @@ export default function StreamQuestion({projectId, documents, question, disabled
     setPhase('retrieving');setDraft('');setError('');setAnswer(null);
     let sources:Evidence[]=[], raw='', finished=false;
     try {
-      const response=await fetch(`/api/projects/${projectId}/evidence/stream`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:value,document_ids:selected?[selected]:[]}),signal:abort.signal});
+      const response=await fetch(`/api/projects/${projectId}/evidence/stream`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:value,document_ids:scope}),signal:abort.signal});
       if(abort.signal.aborted)throw new Error('已停止生成');
       if(!response.ok){const data=await response.json().catch(()=>({}));throw new Error(data.detail||'请求失败，请重试');}
       if(!response.body)throw new Error('浏览器未提供响应流，请升级浏览器后重试');
@@ -52,10 +53,15 @@ export default function StreamQuestion({projectId, documents, question, disabled
     }finally{if(controller.current===abort)controller.current=null;}
   }
   function stop(){controller.current?.abort();setPhase('cancelled');setDraft('');setAnswer(null);onAnswer({mode:'extractive',answer:'已停止生成，仅保留检索原文。',evidence:sourceRef.current,claims:[]});}
-  return <section className="surface question-workspace"><div className="section-heading"><h2>向项目资料提问</h2></div><form onSubmit={e=>{e.preventDefault();submit();}}><label>检索范围<select value={selected} disabled={running||disabled} onChange={e=>setSelected(e.target.value)}><option value="">全部项目文献</option>{documents.map(d=><option value={d.id} key={d.id}>{d.title}{d.filename?' ('+d.filename+')':''}</option>)}</select></label><label>研究问题<textarea rows={4} required minLength={2} maxLength={2000} disabled={running||disabled} value={value} onChange={e=>setValue(e.target.value)} placeholder="例如：Adam参数和训练使用的GPU是什么？"/></label><div className="ask-action"><span className="caption">当前项目全文</span>{running?<button key="stop" type="button" className="button secondary" onClick={e=>{e.preventDefault();stop();}}><Square size={15}/>停止生成</button>:<button key="submit" type="submit" className="button primary" disabled={disabled||value.trim().length<2}><Search size={16}/>查找并回答</button>}</div></form>
+  return <section className="surface question-workspace"><div className="section-heading"><h2>向项目资料提问</h2></div><form onSubmit={e=>{e.preventDefault();submit();}}><details className="details"><summary>检索范围 · {scope.length ? `${scope.length} 篇文献` : '全部项目文献'}</summary>
+      <fieldset disabled={running || disabled} className="question-documents" aria-label="选择检索文献">{documents.map(d => {
+        const checked = scope.includes(d.id);
+        return <label className="task-document-choice" key={d.id}><input type="checkbox" checked={checked} disabled={!checked && scope.length >= 8}
+          onChange={e => setSelected(e.target.checked ? [...scope, d.id] : scope.filter(id => id !== d.id))}/><span>{d.title}</span></label>;
+      })}</fieldset></details><label>研究问题<textarea rows={4} required minLength={2} maxLength={2000} disabled={running||disabled} value={value} onChange={e=>setValue(e.target.value)} placeholder="例如：Adam参数和训练使用的GPU是什么？"/></label><div className="ask-action">{running?<button key="stop" type="button" className="button secondary" onClick={e=>{e.preventDefault();stop();}}><Square size={15}/>停止生成</button>:<button key="submit" type="submit" className="button primary" disabled={disabled||value.trim().length<2}><Search size={16}/>查找并回答</button>}</div></form>
     {running&&<div className="stream-preview"><p role="status">{phase==='retrieving'?'正在检索原文…':'正在生成草稿，尚未完成引文核对…'}</p>{draft&&<p className="stream-draft">{draft}</p>}</div>}
     {phase==='cancelled'&&<p role="status" className="note">已停止生成。未完成草稿未保存，原文仍可查看。</p>}
     {error&&<p role="alert" className="feedback error">{error}</p>}
-    {answer&&<div className="answer"><p>{answer.answer}</p>{answer.claims.map((claim,i)=><div className="claim" key={i}><p>{claim.text}</p><div>{claim.citations.map((c,j)=><button className="source-link" key={c} onClick={()=>cite(c)}><BookOpen size={12}/>依据{j+1}</button>)}</div></div>)}</div>}
+    {answer&&<div className="answer">{!!answer.evidence.length && <p className="caption">{answer.evidence.some(hit => hit.routes?.includes('semantic')) ? '混合检索' : '关键词检索'} · {answer.evidence.length} 段原文</p>}<p>{answer.answer}</p>{answer.claims.map((claim,i)=><div className="claim" key={i}><p>{claim.text}</p><div>{claim.citations.map((c,j)=><button className="source-link" key={c} onClick={()=>cite(c)}><BookOpen size={12}/>依据{j+1}</button>)}</div></div>)}</div>}
   </section>;
 }

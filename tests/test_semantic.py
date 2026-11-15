@@ -6,6 +6,19 @@ from backend import app as core, semantic
 from tests.test_workbench import client, create
 
 
+def test_comparison_keeps_the_model_context_as_evidence(client, monkeypatch):
+    monkeypatch.setattr(semantic, 'MODEL', None)
+    pid = create(client)
+    question = 'Compare the context window lengths of models A and B.'
+    docs = [core.add_document(pid, name, name + '.txt', 2, [
+        {'id': 'p1-s1', 'page': 1, 'text': 'In a generation experiment, examples use a context of 384 tokens.'},
+        {'id': 'p2-s1', 'page': 2, 'text': f'All models use a context window of n = {size} tokens.'},
+    ]) for name, size in [('A', 1024), ('B', 2048)]]
+    for selected in (False, True):
+        passages = semantic.hybrid_retrieve(docs, question, limit=2, cover_documents=selected)
+        assert [(p['title'], p['id']) for p in passages] == [('A', 'p2-s1'), ('B', 'p2-s1')]
+
+
 @pytest.fixture
 def local_model(monkeypatch):
     from fastembed import TextEmbedding

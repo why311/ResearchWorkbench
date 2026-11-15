@@ -195,20 +195,27 @@ def list_watches(pid: str):
     # Explainable title/abstract TF-IDF; never label a text similarity as scientific relevance.
     interests = ' '.join(d['title'] for d in docs) + ' ' + core.project(pid)['question']
     liked = [p['title'] + ' ' + p['abstract'] for p in items if p['rating'] == 1]
+    disliked = [p['title'] + ' ' + p['abstract'] for p in items if p['rating'] == -1]
     query = interests + ' ' + ' '.join(liked[:20])
     scores = [0.0] * len(items)
+    penalties = scores.copy()
     if query.strip() and items:
         try:
-            vectors = TfidfVectorizer(analyzer='char_wb', ngram_range=(3, 5), max_features=20000).fit_transform([query] + [p['title'] + ' ' + p['abstract'] for p in items])
-            scores = (vectors[1:] @ vectors[0].T).toarray().ravel().tolist()
+            vectors = TfidfVectorizer(analyzer='char_wb', ngram_range=(3, 5), max_features=20000).fit_transform(
+                [query, ' '.join(disliked[:20])] + [p['title'] + ' ' + p['abstract'] for p in items])
+            scores = (vectors[2:] @ vectors[0].T).toarray().ravel().tolist()
+            penalties = (vectors[2:] @ vectors[1].T).toarray().ravel().tolist()
         except ValueError:
             pass
-    for item, score in zip(items, scores):
+    for item, score, penalty in zip(items, scores, penalties):
         item['similarity'] = round(score, 4)
         item['reasons'] = [('与项目题名、问题及已点赞摘要的词项相似度 ' + f'{score:.3f}') if query.strip() else '尚无本地兴趣资料；按arXiv更新时间查看']
         if item['repositories']:
             item['reasons'].append('摘要或作者备注含GitHub链接；仓库可用性与复现效果尚未核实')
-    items.sort(key=lambda p: (p['rating'] != -1, p['similarity'], p['updated']), reverse=True)
+        if penalty > .15:
+            item['reasons'].append('与点踩论文相近，推荐排序已降权')
+        item['recommendation_score'] = round(score - .25 * penalty + (.08 if item['repositories'] else 0), 4)
+    items.sort(key=lambda p: (p['rating'] != -1, p['recommendation_score'], p['updated']), reverse=True)
     return {'watches': watches, 'items': items, 'scope': '仅检索条件下最近更新的30条，非穷尽监控；题录和摘要不会作为项目全文证据。自动刷新仅在本机服务运行时执行，失败保留已有结果。'}
 
 
@@ -240,7 +247,7 @@ class ImportBody(BaseModel):
 
 @router.post('/projects/{pid}/paper-watches/{wid}/import')
 def import_paper(pid: str, wid: str, body: ImportBody):
-    from .documents import ingest, job
+    from .documents import enqueue_pdf, job
     with IMPORT_LOCK:
         row = paper(pid, wid, body.arxiv_id)
         with core.db() as conn:
@@ -256,18 +263,12 @@ def import_paper(pid: str, wid: str, body: ImportBody):
         if not content.startswith(b'%PDF-'):
             raise HTTPException(422, 'arXiv没有返回PDF，未加入全文库')
         # Use the existing page/resource limits, OCR queue, original-file preservation and ownership checks.
-        added = asyncio.run(ingest(pid, UploadFile(filename=identifier.replace('/', '_') + '.pdf', file=io.BytesIO(content))))
+        source = {k: metadata[k] for k in ('title', 'authors', 'published', 'updated', 'arxiv_id', 'url')}
+        added = asyncio.run(enqueue_pdf(pid, UploadFile(filename=identifier.replace('/', '_') + '.pdf',
+                                                      file=io.BytesIO(content)), source))
         with core.db() as conn:
             conn.execute('BEGIN IMMEDIATE')
             conn.execute('UPDATE watched_papers SET document_id=? WHERE watch_id=? AND arxiv_id=?', (added['document_id'], wid, body.arxiv_id))
-            conn.execute('UPDATE documents SET title=? WHERE id=? AND project_id=?', (metadata['title'], added['document_id'], pid))
-            saved = conn.execute('SELECT profile FROM document_ingestions WHERE id=?', (added['id'],)).fetchone()
-            profile = json.loads(saved['profile'])
-            if profile.get('title'):
-                profile['parsed_title'] = profile['title']
-            profile['title'] = metadata['title'][:300]
-            profile['metadata_source'] = {k: metadata[k] for k in ('title', 'authors', 'published', 'updated', 'arxiv_id', 'url')}
-            conn.execute('UPDATE document_ingestions SET profile=? WHERE id=?', (json.dumps(profile, ensure_ascii=False), added['id']))
         return {'document_id': added['document_id'], 'existing': False, 'ingestion': added}
 
 

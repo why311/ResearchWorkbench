@@ -1,9 +1,9 @@
-export type Span = { id: string; page: number; text: string; kind?: string; bbox?: number[]; level?: number; confidence?: number; formula_candidate?: boolean };
-export type DocumentProfile = { title?: string; doi?: string; arxiv?: string; version?: number; author?: string; characters?: number; heading_count?: number; formula_candidates?: number; headings?: { text: string; page: number; span_id: string; level: number }[]; duplicates?: { document_id: string; title: string; similarity: number; suggestion: string; scope: string }[] };
+export type Span = { id: string; page: number; text: string; kind?: string; bbox?: number[]; level?: number; confidence?: number; formula_candidate?: boolean; latex_candidate?: string };
+export type DocumentProfile = { title?: string; doi?: string; arxiv?: string; version?: number; author?: string; characters?: number; heading_count?: number; formula_candidates?: number; abstract?: { span_id: string; text: string }[]; affiliations?: { span_id: string; text: string }[]; headings?: { text: string; page: number; span_id: string; level: number }[]; duplicates?: { document_id: string; title: string; similarity: number; semantic_similarity?: number | null; preferred_id?: string | null; current_version?: number | null; existing_version?: number | null; difference?: { insert: number; delete: number; replace: number }; suggestion: string; scope: string }[] };
 export type Ingestion = { id: string; document_id: string; status: string; completed: number; total: number; profile: DocumentProfile; error: string };
 export type MatrixField = { text: string; span_id: string | null };
 export type Doc = { id: string; title: string; filename: string; pages: number; spans: Span[]; matrix: Record<string, any>; has_original?: boolean; span_count?: number; ingestion?: Ingestion };
-export type SourcePage = { items: Span[]; page: number; pages: number; total: number; offset: number; has_more: boolean; details: { width: number; height: number; method: string; columns: number; figures: { bbox: number[] }[]; tables: { bbox: number[]; rows: (string | null)[][] }[] } | null };
+export type SourcePage = { items: Span[]; page: number; pages: number; total: number; offset: number; has_more: boolean; details: { width: number; height: number; method: string; columns: number; figures: { bbox: number[]; method?: string; caption?: string }[]; tables: { bbox: number[]; rows: (string | null)[][] }[] } | null };
 export type ComparedEvidence = Evidence & { quote?: string };
 export type ComparisonCell = { field: string; value: string; status: string; evidence: ComparedEvidence[] };
 export type Comparison = { fields: string[]; rows: { document_id: string; title: string; scope: string; cells: ComparisonCell[] }[]; warnings: string[]; mode: string; retrieval: string; limitation: string };
@@ -23,7 +23,7 @@ export type ResearchNote = NoteForm & { id: string; created: string; updated: st
 export type ExperimentSeries = { id: string; name: string; status: string; config: { factor: string; metric?: string; seeds: number[]; variants: { index: number; label: string; value: number | boolean }[]; note_id: string }; run_ids: string[]; created: string };
 export type SeriesResult = ExperimentSeries & { runs: Run[]; completed: number; summary: { index: number; label: string; n: number; expected: number; mean: number | null; std: number | null; paired_n: number; paired_mean_delta: number | null; positive_pairs: number; negative_pairs: number; ties: number }[]; paired: { variant: string; seed: number; control: number; value: number; delta: number; run_id: string }[]; notes: string[] };
 export type Project = { id: string; name: string; question: string; documents: Doc[]; runs: Run[]; repositories: Repo[]; datasets?: Dataset[]; reports?: Report[]; research_notes?: ResearchNote[]; experiment_series?: ExperimentSeries[] };
-export type Evidence = Span & { document_id: string; title: string; citation: string; score: number };
+export type Evidence = Span & { document_id: string; title: string; citation: string; score: number; routes?: string[] };
 export type Answer = { mode: string; answer: string; evidence: Evidence[]; claims: { text: string; citations: string[] }[] };
 export type ModuleProps = { project: Project; busy: string; action: (key: string, work: () => Promise<any>, success?: string) => Promise<void> };
 

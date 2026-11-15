@@ -46,6 +46,8 @@ except (ValueError, TypeError):
 @asynccontextmanager
 async def lifespan(_app):
     from .paper_watch import start_scheduler
+    from .semantic import warm_cached_model
+    warm_cached_model()
     watch_stop = start_scheduler()
     yield
     watch_stop.set()
@@ -392,8 +394,8 @@ def delete_document(pid: str, did: str):
 
 
 def search_evidence(pid: str, query: str, limit=8):
-    from .retrieval import retrieve
-    return retrieve(records('documents', pid), query, limit)
+    from .semantic import hybrid_retrieve
+    return hybrid_retrieve(records('documents', pid), query, limit)
 
 
 class Question(BaseModel):

@@ -22,6 +22,39 @@ def test_pagerank_direction_dedup_candidates_components():
     assert topology([], []) == {'nodes': [], 'edges': [], 'components': []}
 
 
+def test_graph_does_not_treat_first_page_citation_as_document_identity(client):
+    pid = create(client)
+    cited = core.add_document(pid, 'Layer Normalization', '1607.06450v1.pdf', 1, [
+        {'id': 'p1-s1', 'page': 1, 'text': 'We build on Deep Speech 2; see arXiv:1512.02595.'}])
+    core.add_document(pid, 'Attention Is All You Need', '1706.03762v7.pdf', 1, [
+        {'id': 'p1-s1', 'page': 1, 'text': 'For layer normalization see arXiv:1607.06450.'}])
+    source = core.add_document(pid, 'Citing paper', 'citing.txt', 2, [
+        {'id': 'p1-s1', 'page': 1, 'text': 'These are prior works [1, 2].'},
+        {'id': 'p2-s1', 'page': 2, 'text': 'References'},
+        {'id': 'p2-s2', 'page': 2, 'text': '[1] Ba et al. Layer Normalization. arXiv:1607.06450, 2016.\n[2] Amodei et al. Deep Speech 2. arXiv:1512.02595, 2015.'}])
+    base = f'/api/projects/{pid}'
+    assert client.post(base + '/reference-network/match').json()['created'] == 1
+    assert client.get(base + '/graph-insights').json()['candidate_edges'] == [
+        {'source': source['id'], 'target': cited['id']}]
+
+
+def test_graph_selects_latest_arxiv_version_and_stops_before_subject_index(client):
+    pid = create(client)
+    spans = [{'id': 'p1-s1', 'page': 1, 'text': 'Original research paper.'}]
+    for filename in ('1706.03762v1.pdf', '1706.03762v7_img.pdf'):
+        core.add_document(pid, 'Attention Is All You Need', filename, 1, spans)
+    latest = core.add_document(pid, 'Attention Is All You Need', '1706.03762v7.pdf', 1, spans)
+    core.add_document(pid, 'Layer Normalization', '1607.06450v1.pdf', 1, spans)
+    source = core.add_document(pid, 'Textbook', 'book.pdf', 2, [
+        {'id': 'p1-s1', 'page': 1, 'text': 'References\nVaswani et al. Attention is all you need. 2017.'},
+        {'id': 'p2-s1', 'page': 2, 'text': 'Index\nLayer normalization, 203'}])
+    base = f'/api/projects/{pid}'
+    assert client.post(base + '/reference-network/match').json()['created'] == 1
+    assert client.post(base + '/reference-network/match').json()['created'] == 0
+    assert client.get(base + '/graph-insights').json()['candidate_edges'] == [
+        {'source': source['id'], 'target': latest['id']}]
+
+
 def test_graph_future_sources_and_outline_use_real_passages(client):
     pid, other = create(client), create(client)
     doc = core.add_document(pid, 'Source " ] --> injected', 'source.txt', 2, [
