@@ -1,18 +1,29 @@
 import time
-import os
-from pathlib import Path
 
 import pytest
 
 from backend import app as core, semantic
-from tests.test_documents import client, project as create
+from tests.test_workbench import client, create
+
+
+def test_comparison_keeps_the_model_context_as_evidence(client, monkeypatch):
+    monkeypatch.setattr(semantic, 'MODEL', None)
+    pid = create(client)
+    question = 'Compare the context window lengths of models A and B.'
+    docs = [core.add_document(pid, name, name + '.txt', 2, [
+        {'id': 'p1-s1', 'page': 1, 'text': 'In a generation experiment, examples use a context of 384 tokens.'},
+        {'id': 'p2-s1', 'page': 2, 'text': f'All models use a context window of n = {size} tokens.'},
+    ]) for name, size in [('A', 1024), ('B', 2048)]]
+    for selected in (False, True):
+        passages = semantic.hybrid_retrieve(docs, question, limit=2, cover_documents=selected)
+        assert [(p['title'], p['id']) for p in passages] == [('A', 'p2-s1'), ('B', 'p2-s1')]
 
 
 @pytest.fixture
 def local_model(monkeypatch):
     from fastembed import TextEmbedding
     from tokenizers import Tokenizer
-    cache = Path(os.environ.get('RESEARCH_TEST_SEMANTIC_CACHE', str(core.ROOT / 'data' / 'semantic-model')))
+    cache = core.ROOT / 'data' / 'semantic-model'
     if not cache.exists():
         pytest.skip('本机未下载语义模型；本测试不自动联网下载')
     model = TextEmbedding(semantic.MODEL_NAME, cache_dir=str(cache), threads=2, providers=['CPUExecutionProvider'], local_files_only=True)
@@ -22,15 +33,6 @@ def local_model(monkeypatch):
     monkeypatch.setattr(semantic, 'TOKENIZER', tokenizer)
     monkeypatch.setattr(semantic, 'REVISION', model.model._model_dir.name)
     return model
-
-
-def add_document(pid, title, filename, pages, spans):
-    import json
-    did = core.uid()
-    with core.db() as conn:
-        conn.execute('INSERT INTO documents(id,project_id,title,filename,pages,spans) VALUES (?,?,?,?,?,?)',
-                     (did, pid, title, filename, pages, json.dumps(spans)))
-    return {'id': did}
 
 
 def wait(client, pid, did):
@@ -47,7 +49,7 @@ def wait(client, pid, did):
 def test_real_multilingual_embedding_and_complete_windows(client, local_model, monkeypatch):
     pid, other = create(client), create(client)
     text = 'We describe fruit color and flavor. ' * 100 + 'A random initialization seed is recorded for every repeated run.'
-    doc = add_document(pid, 'Long original', 'long.txt', 1, [{'id': 'p1-s1', 'page': 1, 'text': text}, {'id': 'p1-s2', 'page': 1, 'text': 'The telescope collects images of distant galaxies.'}])
+    doc = core.add_document(pid, 'Long original', 'long.txt', 1, [{'id': 'p1-s1', 'page': 1, 'text': text}, {'id': 'p1-s2', 'page': 1, 'text': 'The telescope collects images of distant galaxies.'}])
     did = doc['id']
     path = f'/api/projects/{pid}'
     assert client.post(path + f'/documents/{did}/semantic-index').status_code == 200
@@ -69,14 +71,14 @@ def test_real_multilingual_embedding_and_complete_windows(client, local_model, m
     assert client.post(path + '/semantic-search', json={**body, 'question': 'word ' * 190}).status_code == 422
     monkeypatch.setattr(semantic, 'REVISION', 'another-model-version')
     assert client.post(path + '/semantic-search', json=body).status_code == 409
+    client.delete(path + '/documents/' + did)
     with core.db() as conn:
-        conn.execute('DELETE FROM documents WHERE id=?', (did,))
         assert not conn.execute('SELECT * FROM semantic_passages WHERE document_id=?', (did,)).fetchall()
 
 
 def test_index_cancel_before_worker_and_unavailable_model(client, local_model, monkeypatch):
     pid = create(client)
-    doc = add_document(pid, 'Source', 'source.txt', 1, [{'id': 'p1-s1', 'page': 1, 'text': 'Actual original source.'}])
+    doc = core.add_document(pid, 'Source', 'source.txt', 1, [{'id': 'p1-s1', 'page': 1, 'text': 'Actual original source.'}])
     path = f'/api/projects/{pid}/documents/{doc["id"]}/semantic-index'
     monkeypatch.setattr(semantic.POOL, 'submit', lambda *_: None)
     assert client.post(path).status_code == 200

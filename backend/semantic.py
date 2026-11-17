@@ -9,8 +9,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from . import app as core
-from .ingestion import document, decorate, spans
-from .retrieval import retrieve
+from .documents import document, decorate, spans
+from .retrieval import factual_passages, retrieve, select_research_documents
 
 router = APIRouter(prefix='/api')
 MODEL_NAME = 'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2'
@@ -26,7 +26,7 @@ with core.db() as conn:
     conn.execute("UPDATE semantic_indexes SET status='interrupted',error='服务停止，请重新建立索引' WHERE status IN ('queued','running')")
 
 
-def prepare():
+def prepare(allow_download=True):
     global MODEL, TOKENIZER, REVISION, PREPARING, ERROR
     try:
         from fastembed import TextEmbedding
@@ -37,6 +37,8 @@ def prepare():
             try:
                 model = TextEmbedding(MODEL_NAME, cache_dir=str(cache), threads=2, providers=['CPUExecutionProvider'], local_files_only=True)
             except Exception:
+                if not allow_download:
+                    raise
                 model = TextEmbedding(MODEL_NAME, cache_dir=str(cache), threads=2, providers=['CPUExecutionProvider'])
             tokenizer = Tokenizer.from_str(model.model.tokenizer.to_str())
             tokenizer.no_truncation(); tokenizer.no_padding()
@@ -51,12 +53,22 @@ def prepare():
 
 @router.post('/semantic/prepare')
 def prepare_model():
+    queue_prepare(True)
+    return {'preparing': PREPARING, 'ready': MODEL is not None}
+
+
+def queue_prepare(allow_download):
     global PREPARING
     with LOCK:
         if not PREPARING and MODEL is None:
             PREPARING = True
-            POOL.submit(prepare)
-    return {'preparing': PREPARING, 'ready': MODEL is not None}
+            POOL.submit(prepare, allow_download)
+
+
+def warm_cached_model():
+    cache = core.DATA / 'semantic-model'
+    if cache.is_dir() and any(path.is_dir() for path in cache.glob('models--*')):
+        queue_prepare(False)
 
 
 @router.get('/projects/{pid}/semantic-indexes')
@@ -67,10 +79,11 @@ def indexes(pid: str):
     return {'ready': MODEL is not None, 'preparing': PREPARING, 'error': ERROR, 'model': MODEL_NAME, 'revision': REVISION, 'indexes': rows}
 
 
-def chunk_passage(text):
-    # Sentence boundaries prevent unrelated neighboring statements diluting a hit.
-    for sentence in re.finditer(r'.+?(?:[.!?。！？](?:\s+|$)|\n|$)', text, re.S):
-        value = sentence.group()
+def chunk_passage(text, compact=False):
+    # Long books use overlapping windows within each anchored passage to avoid a
+    # separate embedding for every typeset line. Short papers retain sentence-level matches.
+    sections = [text] if compact else (sentence.group() for sentence in re.finditer(r'.+?(?:[.!?。！？](?:\s+|$)|\n|$)', text, re.S))
+    for value in sections:
         offsets = TOKENIZER.encode(value, add_special_tokens=False).offsets
         for i in range(0, len(offsets), 100):
             group = offsets[i:i + 120]
@@ -95,7 +108,7 @@ def build(pid, did):
         doc = document(pid, did)
         pieces = []
         for span in spans(doc):
-            for n, text in enumerate(chunk_passage(span['text'])):
+            for n, text in enumerate(chunk_passage(span['text'], compact=doc['pages'] >= 100)):
                 pieces.append((span['id'], n, text))
                 if len(pieces) > 20000:
                     raise ValueError('全文超过20000个模型窗口，请按研究范围拆分资料后建立索引')
@@ -221,9 +234,14 @@ def search(pid: str, body: SearchBody):
     if not body.question.strip():
         raise HTTPException(422, '请填写检索问题')
     docs = [document(pid, did) for did in dict.fromkeys(body.document_ids)]
+    evidence = rank_documents(docs, body.question, retrieve(docs, body.question, 30) if body.hybrid else [])
+    return {'evidence': evidence[:12], 'model': MODEL_NAME, 'revision': REVISION, 'note': '候选可回到原文。短篇按句索引，百页以上按锚定原文段落建立重叠窗口，每个窗口最多120个词元。'}
+
+
+def rank_documents(docs, question, keyword_hits):
     if MODEL is None:
         raise HTTPException(409, '本地语义模型尚未准备好')
-    if len(TOKENIZER.encode(body.question, add_special_tokens=False).ids) > 120:
+    if len(TOKENIZER.encode(question, add_special_tokens=False).ids) > 120:
         raise HTTPException(422, '问题超过120个模型词元，请缩短；系统不会静默截断问题')
     with core.db() as conn:
         for doc in docs:
@@ -236,7 +254,7 @@ def search(pid: str, body: SearchBody):
             raise HTTPException(422, '所选索引超过32000个窗口，请减少文献数量后检索')
         rows = conn.execute('SELECT * FROM semantic_passages' + selection, ids).fetchall()
     with LOCK:
-        vector = np.asarray(next(MODEL.embed([body.question])), dtype=np.float32)
+        vector = np.asarray(next(MODEL.embed([question])), dtype=np.float32)
     vector /= max(float(np.linalg.norm(vector)), 1e-12)
     candidates = {}
     for row in rows:
@@ -244,16 +262,84 @@ def search(pid: str, body: SearchBody):
         key = (row['document_id'], row['span_id'])
         if key not in candidates or score > candidates[key]['similarity']:
             candidates[key] = {'similarity': score, 'matched_text': row['text']}
-    known = {(d['id'], s['id']): {**s, 'document_id': d['id'], 'title': d['title'], 'citation': d['id'] + ':' + s['id']} for d in docs for s in spans(d)}
+    ordered = sorted(candidates.items(), key=lambda x: x[1]['similarity'], reverse=True)[:30]
+    keys = {key for key, _ in ordered}
+    known = {(d['id'], s['id']): {**s, 'document_id': d['id'], 'title': d['title'], 'citation': d['id'] + ':' + s['id']}
+             for d in docs for s in spans(d) if (d['id'], s['id']) in keys}
     scores = {}
-    for rank, (key, value) in enumerate(sorted(candidates.items(), key=lambda x: x[1]['similarity'], reverse=True)[:30], 1):
+    for rank, (key, value) in enumerate(ordered, 1):
         if key in known:
             scores[key] = {**known[key], **value, 'score': 1 / (60 + rank), 'routes': ['semantic']}
-    if body.hybrid:
-        for rank, hit in enumerate(retrieve(docs, body.question, 30), 1):
-            key = (hit['document_id'], hit['id'])
-            if key not in scores:
-                scores[key] = {**hit, 'score': 0, 'routes': []}
-            scores[key]['score'] += 1 / (60 + rank)
-            scores[key]['routes'].append('keyword')
-    return {'evidence': sorted(scores.values(), key=lambda x: x['score'], reverse=True)[:12], 'model': MODEL_NAME, 'revision': REVISION, 'note': '语义相似度和融合排名不是事实置信度；候选可能无关，解释与引用仍需核对原文。索引按句切分，长句使用最多120个词元的重叠窗口。'}
+    for rank, hit in enumerate(keyword_hits, 1):
+        key = (hit['document_id'], hit['id'])
+        if key not in scores:
+            scores[key] = {**hit, 'score': 0, 'routes': []}
+        scores[key]['score'] += 1 / (60 + rank)
+        scores[key]['routes'].append('keyword')
+    return sorted(scores.values(), key=lambda x: x['score'], reverse=True)
+
+
+def hybrid_retrieve(docs, question, limit=8, sparse_index=None, cover_documents=False):
+    if not docs:
+        return []
+    candidates, focus = docs, docs if cover_documents else []
+    if len(docs) > 8:
+        candidates, named = select_research_documents(docs, question)
+        focus = named if 1 < len(named) <= limit else candidates if cover_documents else []
+    keyword_limit = max(30, limit)
+    if sparse_index is not None:
+        hits = sparse_index.search(question, keyword_limit)
+    else:
+        per_doc = max(4, keyword_limit // len(candidates)) if candidates is not docs else None
+        hits = retrieve(candidates, question, keyword_limit, per_document_limit=per_doc)
+    evidence = [{**hit, 'routes': ['keyword']} for hit in hits]
+    if MODEL is not None:
+        with core.db() as conn:
+            ready = {r[0] for r in conn.execute("SELECT document_id FROM semantic_indexes WHERE status='ready' AND model_revision=?", (REVISION,))}
+        indexed = [doc for doc in candidates if doc['id'] in ready]
+        if indexed:
+            try:
+                evidence = rank_documents(indexed, question, hits)
+            except HTTPException as exc:
+                if exc.status_code not in {409, 422}:
+                    raise
+    factual_docs = focus or (docs if len(docs) <= 8 else [])
+    factual = factual_passages(factual_docs, question) if len(factual_docs) > 1 else []
+    if factual:
+        # Keep passages that state the requested facts even when titles and
+        # introductory language dominate the general ranking.
+        general = {hit['citation']: hit for hit in evidence}
+        factual_ids = {hit['citation'] for hit in factual}
+        evidence = [general.get(hit['citation'], hit) for hit in factual] + [
+            hit for hit in evidence if hit['citation'] not in factual_ids]
+    coverage = focus or (factual_docs if factual else [])
+    if len(coverage) > 1:
+        per_doc = max(1, min(2, limit // len(coverage)))
+        chosen = {hit['citation'] for doc in coverage
+                  for hit in [row for row in evidence if row['document_id'] == doc['id']][:per_doc]}
+        evidence = ([hit for hit in evidence if hit['citation'] in chosen] +
+                    [hit for hit in evidence if hit['citation'] not in chosen])
+    return evidence[:limit]
+
+
+def semantic_front_similarity(source, others):
+    if MODEL is None or not others:
+        return []
+    # Present equally sized excerpts from each paper to the existing CPU model.
+    passages = [[p for p in chunk_passage(text[:6000]) if len(p) >= 25][:16] for text in [source, *others]]
+    if not passages[0]:
+        return [None] * len(others)
+    with LOCK:
+        vectors = np.asarray(list(MODEL.embed([p for paper in passages for p in paper], batch_size=32)))
+    start = len(passages[0])
+    first = vectors[:start]
+    values = []
+    for paper in passages[1:]:
+        stop = start + len(paper)
+        if not paper:
+            values.append(None)
+        else:
+            scores = np.clip(first @ vectors[start:stop].T, -1, 1)
+            values.append(round(float((scores.max(axis=0).mean() + scores.max(axis=1).mean()) / 2), 3))
+        start = stop
+    return values

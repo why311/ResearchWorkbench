@@ -13,7 +13,6 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field, model_validator
 
 from . import app as core
-from .experiments import regular_file
 
 router = APIRouter(prefix='/api')
 ACTIVE = {'queued', 'running'}
@@ -55,7 +54,7 @@ def resolve_note(pid, note):
     from .studio import get_report
     linked_reports = []
     for report in core.records('reports', pid):
-        refs = set(report['chart_run_ids']) | {binding['run_id'] for binding in report['bindings']}
+        refs = set(report['chart_run_ids']) | {b['run_id'] for b in report['bindings']}
         if refs.intersection(note['run_ids']):
             linked_reports.append(get_report(pid, report['id']))
     gaps = []
@@ -302,14 +301,14 @@ def export_series(pid: str, sid: str):
             archive.write(core.ROOT / 'backend' / 'replay_repository.py', 'replay_repository.py')
             for name in repo['files']:
                 path = core.DATA / 'repositories' / repo['id'] / name
-                if regular_file(path):
+                if path.is_file():
                     archive.write(path, 'repository/' + name)
             archive.write(core.ROOT / 'Dockerfile.runner', 'Dockerfile.runner')
         archive.write(core.ROOT / 'requirements.txt', 'requirements.txt')
         instructions = '# 多种子对照实验\n\n' + '\n'.join('- ' + n for n in data['notes']) + '\n\n## 独立复跑\n\n'
         for run in data['runs']:
             for path in (core.DATA / 'runs' / run['id']).glob('*'):
-                if regular_file(path):
+                if path.is_file():
                     archive.write(path, f"runs/{run['id']}/{path.name}")
             if external and (core.DATA / 'runs' / run['id'] / 'config.json').exists():
                 instructions += f"- `python replay_repository.py --config runs/{run['id']}/config.json --repository repository --output replay/{run['id']}`\n"

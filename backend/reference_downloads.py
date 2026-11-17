@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from . import app as core
 from . import discovery, paper_watch
-from .ingestion import ingest, document
+from .documents import enqueue_pdf, document
 
 router = APIRouter(prefix='/api')
 POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix='reference-download')
@@ -41,6 +41,24 @@ def save(jid, items):
 
 def normalized(text):
     return ''.join(re.findall(r'\w', text.lower()))
+
+
+def lookup_for_reference(text):
+    from .literature import identifiers
+
+    keys = identifiers(text)
+    if keys:
+        return next((value for value, _, _ in keys if value.startswith('arxiv:')), keys[0][0])
+    value = re.sub(r'(?<=\w)-\s*\n\s*(?=\w)', '', text)
+    value = re.sub(r'\s+', ' ', re.sub(r'^\s*(?:\[\d+\]|\d+\.)\s*', '', value)).strip()
+    quoted = re.search(r'[“"]([^”"]{10,220})[”"]', value)
+    if quoted:
+        return quoted[1].rstrip('.,;')
+    pattern = r'(?:\b(?:19|20)\d{2}[a-z]?\.\s+|\b[A-Z]\.:\s+|(?<!\b[A-Z])\.\s+)(.{10,220}?)(?:\.\s+|$)'
+    title = re.search(pattern, value)
+    if title and not re.fullmatch(r'(?:19|20)\d{2}', title[1]):
+        return title[1].rstrip('.,;')
+    return value[:300]
 
 
 def s3_read(url, maximum=2*1024*1024, params=None):
@@ -147,7 +165,7 @@ def import_candidate(pid, candidate):
                     return old['document_id']
     if key.startswith('arxiv:') and paper_watch.ARXIV.fullmatch(candidate.get('arxiv_id', '')):
         content = paper_watch.download('https://arxiv.org/pdf/'+candidate['arxiv_id'], 32*1024*1024, timeout=45)
-        source = {k: candidate[k] for k in ('title', 'arxiv_id', 'url')}
+        source = {k: candidate[k] for k in ('title', 'authors', 'published', 'updated', 'arxiv_id', 'url') if k in candidate}
     elif key.startswith('pmc:'):
         content, source = pmc_pdf(candidate.get('pmcid', ''))
         source['title'] = candidate['title']
@@ -155,12 +173,8 @@ def import_candidate(pid, candidate):
         raise HTTPException(422, '没有可用的官方全文来源')
     if not content.startswith(b'%PDF-'):
         raise HTTPException(422, '来源未返回PDF，未导入全文')
-    added = asyncio.run(ingest(pid, UploadFile(filename=key.replace(':','_').replace('/','_')+'.pdf', file=io.BytesIO(content))))
-    with core.db() as conn:
-        profile = json.loads(conn.execute('SELECT profile FROM document_ingestions WHERE id=?', (added['id'],)).fetchone()[0])
-        profile['metadata_source'] = source
-        conn.execute('UPDATE document_ingestions SET profile=? WHERE id=?', (json.dumps(profile, ensure_ascii=False), added['id']))
-        conn.execute('UPDATE documents SET title=? WHERE id=? AND project_id=?', (candidate['title'][:300], added['document_id'], pid))
+    added = asyncio.run(enqueue_pdf(pid, UploadFile(filename=key.replace(':','_').replace('/','_')+'.pdf',
+                                                  file=io.BytesIO(content)), source))
     return added['document_id']
 
 

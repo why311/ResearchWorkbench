@@ -64,6 +64,49 @@ def summary(values, column, total):
     return result
 
 
+def chart_sources(output, name, kind, labels, series, xlabel, numeric_x=None):
+    """Write editable plots from the same processed values used in the PNG."""
+    if not series or not labels:
+        return
+    escape = {'\\': r'\textbackslash{}', '{': r'\{', '}': r'\}', '$': r'\$', '&': r'\&',
+              '#': r'\#', '_': r'\_', '%': r'\%', '~': r'\textasciitilde{}', '^': r'\textasciicircum{}'}
+    def tex(value):
+        return ''.join(escape.get(c, c) for c in ' '.join(str(value).split()))
+    def mermaid_label(value):
+        clean = ' '.join(str(value).split())
+        return '"' + ''.join(c if c.isalnum() or c in ' .-_' else f'#{ord(c)};' for c in clean) + '"'
+    def fmt(value):
+        return format(value, '.15g')
+
+    x = list(range(1, len(labels) + 1)) if numeric_x is None else numeric_x
+    lines = [r'% In the preamble: \usepackage{pgfplots} \pgfplotsset{compat=1.18}',
+             r'% Use XeLaTeX with xeCJK for Chinese labels.',
+             r'\begin{tikzpicture}', r'\begin{axis}[unbounded coords=jump, xlabel={' + tex(xlabel) + '}']
+    if kind == 'bar':
+        lines[-1] += ', ybar, enlarge x limits=0.12'
+    if numeric_x is None and len(labels) <= 60:
+        lines[-1] += ', xtick={' + ','.join(map(str, x)) + '}, xticklabels={' + ','.join('{' + tex(v) + '}' for v in labels) + '}'
+    lines[-1] += ']'
+    for label, values in series:
+        coordinates = ' '.join(f'({fmt(pos)},{fmt(value) if value is not None else "nan"})' for pos, value in zip(x, values))
+        lines.extend([r'\addplot coordinates {' + coordinates + '};', r'\addlegendentry{' + tex(label) + '}'])
+    lines.extend([r'\end{axis}', r'\end{tikzpicture}'])
+    (output / (name + '.tex')).write_text('\n'.join(lines) + '\n', encoding='utf-8')
+
+    # Mermaid's categorical XY chart needs one finite y per tick.
+    # For irregular numeric x, missing values or long series, the TikZ file retains the full plot.
+    complete = [(label, values) for label, values in series if all(value is not None for value in values)]
+    intervals = {round(b - a, 9) for a, b in zip(x, x[1:])}
+    if not complete or len(labels) > 60 or (numeric_x is not None and (len(intervals) > 1 or len(set(x)) != len(x))):
+        return
+    lines = ['xychart-beta', '    title ' + mermaid_label(name), '    x-axis ' + mermaid_label(xlabel) +
+             ' [' + ', '.join(mermaid_label(v) for v in labels) + ']']
+    for index, (label, values) in enumerate(complete, 1):
+        lines.append(f'    %% {index}. ' + mermaid_label(label))
+        lines.append('    ' + kind + ' [' + ', '.join(fmt(value) for value in values) + ']')
+    (output / (name + '.mmd')).write_text('\n'.join(lines) + '\n', encoding='utf-8')
+
+
 def analyze(input_path, plan, output):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
@@ -163,6 +206,7 @@ def analyze(input_path, plan, output):
     metrics = {'input_rows': audit['input_rows'], 'output_rows': len(rows), 'imputed_cells': audit['imputed_cells']}
     metrics.update({f'mean:{r["column"]}': r['mean'] for r in summaries if r['mean'] is not None})
     (output / 'metrics.json').write_text(json.dumps(metrics, ensure_ascii=False, allow_nan=False), encoding='utf-8')
+    chart_sources(output, 'summary-count', 'bar', columns, [('Valid observations', [s['count'] for s in summaries])], 'Field')
     configure_plot()
     captions = {'distribution.png': f'清洗后共{len(rows)}行；各字段直方图仅包含有效数值，缺失不补零。' + ' '.join(f'{s["column"]}：n={s["count"]}，均值={s["mean"]}，范围[{s["min"]}, {s["max"]}]。' for s in summaries)}
     fig, axes = plt.subplots(len(columns), 1, figsize=(7, max(3, 2.8 * len(columns))), squeeze=False)
@@ -188,7 +232,17 @@ def analyze(input_path, plan, output):
         fig.tight_layout()
         fig.savefig(output / 'groups.png')
         plt.close(fig)
+        by_key = {(item['group'], item['column']): item['mean'] for item in grouped}
+        for index, column in enumerate(columns, 1):
+            chart_sources(output, f'group-means-{index}', 'bar', labels,
+                          [(column, [by_key.get((label, column)) for label in labels])], group_by)
         captions['groups.png'] = f'按{group_by}分组后的有效样本均值；图示前{len(labels)}组，完整分组及样本数见groups.csv；未进行显著性检验。'
+        for column in columns:
+            values = [(label, by_key[label, column]) for label in labels if by_key.get((label, column)) is not None]
+            if len(values) >= 2:
+                low, high = min(values, key=lambda item: item[1]), max(values, key=lambda item: item[1])
+                if low[1] != high[1]:
+                    captions['groups.png'] += f'{column}的最低组均值为{low[0]}（{low[1]:.4g}），最高为{high[0]}（{high[1]:.4g}）。'
     if correlations:
         matrix = np.full((len(columns), len(columns)), np.nan)
         for i, column in enumerate(columns):
@@ -219,7 +273,17 @@ def analyze(input_path, plan, output):
             axis.plot(x, [np.nan if r[column] is None else r[column] for r in ordered], color='#4265bc', linewidth=1.2)
             axis.set_ylabel(column); axis.set_xlabel(x_column or '清洗后行号（原始顺序）')
         fig.tight_layout(); fig.savefig(output / 'line.png'); plt.close(fig)
+        chart_sources(output, 'line', 'line', [str(value) for value in x],
+                      [(column, [row[column] for row in ordered]) for column in columns],
+                      x_column or 'Row', numeric_x=x)
         captions['line.png'] = f'横轴为{x_column or "清洗后原始行号"}，' + ('按横轴数值升序连接；' if x_column else '按数据原始顺序连接；') + f'共{len(ordered)}行，缺失数值使折线断开；连线不代表插值或时间因果。'
+        for column in columns:
+            values = [(pos, row[column]) for pos, row in zip(x, ordered) if row[column] is not None]
+            if len(values) >= 2:
+                first, last = values[0], values[-1]
+                captions['line.png'] += (f'{column}由首个有效点（{first[0]:.4g}, {first[1]:.4g}）'
+                                         f'到末个有效点（{last[0]:.4g}, {last[1]:.4g}）；'
+                                         f'观测范围[{min(v for _, v in values):.4g}, {max(v for _, v in values):.4g}]。')
     if any(m in plan['methods'] for m in ('radar', 'radar3d')):
         if len(columns) < 3:
             raise ValueError('雷达图至少需要三个数值字段。')

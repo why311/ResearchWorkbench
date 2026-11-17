@@ -7,9 +7,9 @@ import httpx
 import pytest
 from fastapi import HTTPException
 
-from backend import app as core, ingestion as documents, paper_watch as watches
-from tests.test_documents import client, project as create
-from tests.test_documents import pdf as pdf_bytes
+from backend import app as core, documents, paper_watch as watches
+from tests.test_workbench import client, create
+from tests.test_documents import pdf_bytes
 
 
 FEED = b'''<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
@@ -102,9 +102,7 @@ def test_import_reuses_queue_ownership_and_same_paper_in_other_watch(client, mon
     assert client.post(base + f'/{second}/import', json=body).json()['document_id'] == did
     assert len([url for url in calls if '/pdf/' in url]) == 1
     assert client.post(base + f'/{wid}/import', json={'arxiv_id': 'https://localhost/secret'}).status_code == 404
-    # The public stage has no document-delete route; verify the FK behavior directly.
-    with core.db() as conn:
-        conn.execute('DELETE FROM documents WHERE id=?',(did,))
+    client.delete(f'/api/projects/{pid}/documents/{did}')
     assert next(p for p in client.get(base).json()['items'] if p['watch_id'] == wid and p['key'] == body['arxiv_id'])['document_id'] is None
 
 

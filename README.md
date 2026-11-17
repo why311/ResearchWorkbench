@@ -1,55 +1,64 @@
 # 研舟 · ResearchWorkbench
 
-研舟是一款本地科研工作台，面向学生和小型研究团队。你可以按项目管理论文和研究问题，从原文定位证据，记录实验参数与结果，再把分析和写作草稿导出。
+面向学生和小型研究团队的科研工作台。在同一项目里导入文献、核对原文、准备复现实验、分析数据，并把已核对的引文和真实运行结果带入文稿。
 
-## 功能
+## 能做什么
 
-- **文献管理与阅读**：导入 PDF、Markdown 和 UTF-8 文本，按页查看原文，保存批注、精读笔记和阅读待办。结构化 PDF 支持后台解析、扫描页 OCR 和原件下载。
-- **文献发现与引用**：检索 Crossref、arXiv 和 PubMed，跟踪 arXiv 主题，批量获取 arXiv 和 NLM PMC 的开放全文。核对 DOI 或 arXiv 引用后，可关联项目内文献并导出引用关系。
-- **证据与写作**：使用关键词或本地多语言语义模型定位原文，逐篇比较论文的实验设定。支持研究任务、双语对照、综述和开题草稿，导出时保留引用页码和原文片段。
-- **实验与数据分析**：运行内置 Iris 分类示例，或在 Docker 中运行导入的 Python 仓库。按同一组随机种子做参数对照，导入 CSV、TSV 或 XLSX 进行清洗、统计和绘图，导出参数、日志、结果及复跑材料。
+- **文献与开题**。导入 PDF、TXT 与 Markdown。支持扫描页 OCR、版本比较、原文与译文联动、带页段来源的问答、项目内引用图谱，以及 Crossref、arXiv、PubMed 检索与 arXiv 追踪。
+- **实验复现**。从原文整理复现条件，运行内置 Iris 案例，或将外部 Python 仓库放入隔离容器。记录逐次参数、日志和实际指标，并支持多种子对照。
+- **数据分析**。读入 CSV、TSV、XLSX 或运行产生的数据，配置清洗步骤，计算描述统计、分组统计和 Pearson 相关；导出图表、数据和复跑代码。
+- **成果同步**。把项目里的原文引文和成功运行的指标绑定到文稿；导出 Word、Markdown 或含来源文件的 ZIP。
 
-- **成果同步与导出**：将综述或开题草稿转为成果文稿，插入原文引用，绑定实际运行指标和图表，导出 Markdown、ZIP 或 Word。
+公开仓库入口为 [why311/ResearchWorkbench](https://github.com/why311/ResearchWorkbench)。
 
-## 快速开始
+## 技术架构
 
-使用 Python 3.12 和 Node.js 20 或更新版本。在项目目录运行以下 PowerShell 命令。
+浏览器由 React、TypeScript 与 Vite 构建，通过 HTTP 调用 FastAPI。FastAPI 用 SQLite 管理项目、文档页段、引用和运行记录，原件及成果按项目保存在本机数据目录。独立 PDF 工作进程逐页解析原件，扫描页用 RapidOCR。证据检索融合 TF-IDF 与可选的本地多语言 MiniLM；聊天、翻译和页面解读使用兼容 Chat Completions 的模型接口。外部实验由 Docker 执行，限制网络、资源和可写目录。
+
+| 路径 | 主要职责 |
+| --- | --- |
+| `src/` | 工作区、原文与引用定位、结果渲染 |
+| `backend/` | API、文档解析、检索、模型调用、实验与成果 |
+| `tests/` | 接口和流程回归 |
+| `examples/` | Iris 流程示例与可导入仓库 |
+| `docs/environment.md` | 环境变量、依赖及启动说明 |
+
+## 安装与运行
+
+需要 Git、Python 3.11 或 3.12、Node.js 22 和 npm。Docker Desktop 仅在运行隔离实验时使用。
 
 ```powershell
-python -m venv .venv
+# 从随附开发历史包检出本次交付
+# 将下列路径替换成开发历史包所在位置
+git clone "研舟开发历史.bundle" ResearchWorkbench
+cd ResearchWorkbench
+py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-npm install
+npm ci
 npm run build
 .\.venv\Scripts\python.exe -m uvicorn backend.app:app --host 127.0.0.1 --port 8787
 ```
 
-打开 [本地工作台](http://127.0.0.1:8787)，创建项目并填写研究问题。可以先导入一篇论文做批注，也可以打开「实验与分析」运行 Iris 示例。
+打开 [本机工作台](http://127.0.0.1:8787/)。后续在 Windows 上可直接双击 `启动研舟.cmd`。若使用 Python 3.11，将命令中的 `py -3.12` 改为 `py -3.11`。前端开发时保留后端 8787 端口，另开终端运行 `npm run dev`，访问 5178 端口。
 
-## 使用说明
-
-| 想做什么 | 从哪里开始 |
-| --- | --- |
-| 阅读和批注文献 | 在「项目文献」导入文件，选择文献后按页查看。普通导入支持最大 20 MB、300 页的可提取文字 PDF。 |
-| 处理扫描件或长 PDF | 在「文献处理与发现 → PDF与OCR」导入。支持最大 32 MB、2,000 页，任务可停止后继续。识别结果可对照原件核对。 |
-| 用中文查找英文原文 | 在「研究与写作 → 语义检索」准备本地模型，为选中的文献建索引，再输入问题。首次下载模型需要联网，后续索引和检索在本机执行。 |
-| 运行外部代码 | 启动 Docker，在「实验与分析 → 实验复现」导入 GitHub 仓库或 ZIP，准备运行环境并选择 Python 入口。仓库以只读方式挂载，容器禁网，并限制 CPU、内存、进程数与运行时间。 |
-| 对照实验或处理表格 | 在「批量对照」配置变体、随机种子和比较指标。在「数据分析」导入表格或已有运行产物，选择处理规则并导出复跑包。 |
-
-项目数据和上传文件默认保存在本地 `data/` 目录。自定义数据目录、账号、HTTPS 代理和论文模板的配置见 [运行与部署](docs/deployment.md)。
-
-## 配置聊天模型
-
-模型辅助精读、页段翻译和综述使用兼容 Chat Completions 的服务。在「模型设置」填写基础地址、模型名称和密钥，保存后可验证连接。也可以在启动终端设置 `RESEARCH_MODEL_URL`、`RESEARCH_MODEL_NAME` 和 `RESEARCH_MODEL_KEY` 作为初始配置。变量示例见 [.env.example](.env.example)。
-
-手动阅读、本地检索、实验和数据分析可独立使用。调用聊天模型时，相关原文会发送给所配置的服务。生成内容可以回看引用，便于核对上下文和结论。
-
-## 开发
-
-前端使用 React、TypeScript 和 Vite。后端使用 FastAPI 和 SQLite。
+安装后可先新建项目，导入一篇自有使用权限的 PDF，在“证据比较”提问并打开出处，再运行一次 Iris 实验。要体验隔离实验，先启动 Docker 并执行：
 
 ```powershell
-npm run dev
-.\.venv\Scripts\python.exe -m pytest tests -q
+docker build -t research-workbench:0.1 -f Dockerfile.runner .
 ```
 
-前端开发时另开终端运行后端，Vite 将 `/api` 请求转发到本地服务。第三方组件及来源见 [第三方说明](THIRD_PARTY_NOTICES.md)。
+随后在“实验复现”导入 `examples/iris-repository.zip`，入口选择 `train.py`，依次填写 `--config`、`/output/config.json`、`--output`、`/output`，每项单独一行。
+
+## 模型与配置
+
+[环境变量模板](.env.example) 记录数据目录、模型地址、名称和密钥，以及可选的账户与站点来源。将所需变量设置在启动进程的终端中。已保存的本机配置优先使用，模型密钥由运行环境提供。首次准备本地语义模型需联网下载权重。无聊天模型时仍可导入全文、检索原文、手工精读和执行实验。
+
+模型调用会发送当前请求需要的原文或原页图像。系统核验引文位置和逐字摘录，分析结论由作者复核。图谱中的 PageRank 描述当前项目内已确认的引用关系。[第三方来源](THIRD_PARTY_NOTICES.md)
+
+## 团队信息
+
+| 项目 | 内容 |
+| --- | --- |
+| 团队名称 |  |
+| 成员及分工 |  |
+| 指导教师 |  |

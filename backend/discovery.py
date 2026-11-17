@@ -8,10 +8,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query
 
 from . import app as core
-from pydantic import BaseModel, Field
-class MetadataBody(BaseModel):
-    doi: str = Field(default='', max_length=300)
-
+from .document_tools import MetadataBody
 
 router = APIRouter(prefix='/api')
 
@@ -67,8 +64,8 @@ def discover(q: str = Query(min_length=2,max_length=300), provider: Literal['cro
 
 @router.post('/projects/{pid}/documents/{did}/metadata-resolve')
 def resolve_metadata(pid: str, did: str, body: MetadataBody):
-    from .ingestion import document
-    from .references import DOI
+    from .documents import document
+    from .literature import DOI
     document(pid, did)
     identifier = body.doi.removeprefix('https://doi.org/').strip()
     if not DOI.fullmatch(identifier):

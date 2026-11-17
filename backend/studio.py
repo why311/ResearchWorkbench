@@ -1,4 +1,4 @@
-"""Dataset import, cleaning and reproducible descriptive analysis."""
+"""Dataset analysis and result-linked manuscript routes."""
 import csv
 import io
 import json
@@ -15,11 +15,11 @@ from openpyxl import load_workbook
 from pydantic import BaseModel, Field, model_validator
 
 from . import app as core
-from .experiments import regular_file
 from .analysis_runner import MISSING, number, write_csv, configure_plot
 from .report_text import CITATION, body_markdown, evidence_markdown
 
 router = APIRouter(prefix='/api')
+PLOT_LOCK = threading.Lock()
 
 
 def dataset(pid, did):
@@ -148,8 +148,6 @@ def import_run_dataset(pid: str, body: ImportArtifact):
     if body.filename not in run['artifacts'] or Path(body.filename).name != body.filename or Path(body.filename).suffix.lower() not in {'.csv', '.tsv'}:
         raise HTTPException(422, '请选择本项目运行产生的CSV或TSV文件')
     path = core.DATA / 'runs' / run['id'] / body.filename
-    if not regular_file(path):
-        raise HTTPException(404, '结果表不存在')
     if path.stat().st_size > 10 * 1024 * 1024:
         raise HTTPException(413, '结果表超过10MB')
     headers, rows, metadata = parse_table(body.filename, path.read_bytes())
@@ -240,9 +238,6 @@ def export_analysis(pid: str, rid: str):
     return Response(output.getvalue(), media_type='application/zip', headers={'Content-Disposition': 'attachment; filename="analysis-replay.zip"'})
 
 
-PLOT_LOCK = threading.Lock()
-
-
 class Binding(BaseModel):
     alias: str = Field(pattern=r'^[A-Za-z][A-Za-z0-9_]{0,39}$')
     run_id: str
@@ -264,28 +259,6 @@ class ReportBody(BaseModel):
     citations: list[Citation] = Field(default_factory=list, max_length=30)
     chart_run_ids: list[str] = Field(default_factory=list, max_length=20)
     chart_metrics: list[str] = Field(default_factory=list, max_length=6)
-
-
-@router.get('/projects/{pid}/reports')
-def list_reports(pid: str):
-    core.project(pid)
-    with core.db() as conn:
-        return [dict(row) for row in conn.execute(
-            'SELECT id,title FROM reports WHERE project_id=? ORDER BY updated DESC,rowid DESC', (pid,))]
-
-
-class DraftSource(BaseModel):
-    draft_id: str
-
-
-@router.post('/projects/{pid}/reports/from-draft')
-def report_from_draft(pid: str, body: DraftSource):
-    from .writing_drafts import get_draft
-
-    draft = get_draft(pid, body.draft_id)
-    if len(draft['template']) > 30000:
-        raise HTTPException(422, '请将草稿正文缩短至 30000 字符以内再转为成果文稿')
-    return create_report(pid, ReportBody(title=draft['title'], template=draft['template'], citations=draft['citations']))
 
 
 def report_record(pid, report_id):
@@ -347,7 +320,7 @@ def resolve_report(record):
 
 
 def resolve_citations(pid, references):
-    from .ingestion import document, spans
+    from .documents import document, spans
     sources, errors, cache = [], [], {}
     for ref in references:
         key = ref['document_id']
@@ -482,15 +455,12 @@ def report_word(pid: str, rid: str, template: Literal['generic','school'] = 'gen
     if not generated:
         raise HTTPException(409, '请先生成成果，再导出对应版本的Word')
     from .report_docx import export_word
-    from docx.opc.exceptions import PackageNotFoundError
     try:
         with PLOT_LOCK:
             template_path = core.DATA / 'templates' / 'school.docx' if template == 'school' else None
             if template_path and not template_path.is_file():
                 raise HTTPException(409, '本机尚未安装学校模板')
             content = export_word(generated['state'], generated['version'], generated['created'], template_path)
-    except (PackageNotFoundError, zipfile.BadZipFile, KeyError) as exc:
-        raise HTTPException(422, 'Word 模板无法打开或缺少必要样式') from exc
     except (ValueError, TypeError) as exc:
         raise HTTPException(422, str(exc)) from exc
     return Response(content, media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document', headers={'Content-Disposition': f'attachment; filename="research-report-v{generated["version"]}.docx"'})

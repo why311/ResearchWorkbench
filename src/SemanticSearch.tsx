@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { BookOpen, Download, LoaderCircle, Search, Square } from 'lucide-react';
 import { api, post, type Evidence, type ModuleProps } from './api';
+import './literature.css';
 
 type Index = { document_id: string; status: string; completed: number; total: number; error: string; model_revision: string };
 type State = { ready: boolean; preparing: boolean; error: string; model: string; revision: string; indexes: Index[] };

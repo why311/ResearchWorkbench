@@ -2,15 +2,13 @@ import time
 
 from backend import app as core
 from backend import assistant
-from tests.test_documents import client, project as create
+from tests.test_workbench import client, create
 
 
 def add(client, pid, name, text):
     response = client.post(f'/api/projects/{pid}/documents', files={'file': (name + '.md', text.encode())})
     assert response.status_code == 200
-    doc = response.json()
-    page = client.get(f'/api/projects/{pid}/documents/{doc["id"]}').json()
-    return {**doc, 'spans': page['items']}
+    return response.json()
 
 
 def task(client, pid, docs, kind='comparison', **extra):

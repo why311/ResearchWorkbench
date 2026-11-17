@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
 import { BookOpen, Plus, Trash2 } from 'lucide-react';
-import { api, type ModuleProps, type Citation, type SourcePage } from './api';
+import { api, type Project, type Citation, type SourcePage, type Doc } from './api';
+import SourcePanel from './SourcePanel';
 
-export default function ReportCitations({ project, source, citations, onChange, onInsert, template, disabled }: {
-  project: ModuleProps['project']; source: (did: string, sid?: string) => void; citations: Citation[]; onChange: (values: Citation[]) => void;
+export default function ReportCitations({ project, citations, onChange, onInsert, template, disabled }: {
+  project: Project; citations: Citation[]; onChange: (values: Citation[]) => void;
   onInsert: (alias: string) => void; template: string; disabled: boolean;
 }) {
   const [documentId, setDocumentId] = useState(project.documents[0]?.id || '');
@@ -13,6 +14,7 @@ export default function ReportCitations({ project, source, citations, onChange, 
   const [data, setData] = useState<SourcePage | null>(null);
   const [error, setError] = useState('');
   const [revision, setRevision] = useState(0);
+  const [view, setView] = useState<{ document: Doc; span?: string } | null>(null);
   const document = project.documents.find(d => d.id === documentId);
   const used = [...new Set([...template.matchAll(/\[\[cite:([A-Za-z][A-Za-z0-9_]{0,39})\]\]/g)].map(m => m[1]))];
   useEffect(() => {
@@ -42,6 +44,7 @@ export default function ReportCitations({ project, source, citations, onChange, 
         </>}
       </>}
     </>}
-    {citations.map((c, i) => { const doc = project.documents.find(d => d.id === c.document_id); return <div className="binding-row" key={c.alias}><p><b>{used.includes(c.alias) ? `正文[${used.indexOf(c.alias) + 1}]` : '尚未插入正文'}</b> · {doc?.title || '来源文献已移除'} · {c.span_id}</p><div className="inline-actions" style={{ flexWrap: 'wrap' }}><button className="text-button" disabled={disabled || !doc} onClick={() => onInsert(c.alias)}>插入正文</button><button className="text-button" disabled={!doc} onClick={() => doc && source(doc.id, c.span_id)}>回看引用原文</button><button className="icon-button" aria-label={`移除文献引用${i + 1}`} disabled={disabled} onClick={() => onChange(citations.filter(x => x.alias !== c.alias))}><Trash2 size={15}/></button></div></div>; })}
+    {citations.map((c, i) => { const doc = project.documents.find(d => d.id === c.document_id); return <div className="binding-row" key={c.alias}><p><b>{used.includes(c.alias) ? `正文[${used.indexOf(c.alias) + 1}]` : '尚未插入正文'}</b> · {doc?.title || '来源文献已移除'} · {c.span_id}</p><div className="inline-actions" style={{ flexWrap: 'wrap' }}><button className="text-button" disabled={disabled || !doc} onClick={() => onInsert(c.alias)}>插入正文</button><button className="text-button" disabled={!doc} onClick={() => doc && setView({ document: doc, span: c.span_id })}>回看引用原文</button><button className="icon-button" aria-label={`移除文献引用${i + 1}`} disabled={disabled} onClick={() => onChange(citations.filter(x => x.alias !== c.alias))}><Trash2 size={15}/></button></div></div>; })}
+    {view && <SourcePanel projectId={project.id} selected={view} close={() => setView(null)}/>}
   </div>;
 }

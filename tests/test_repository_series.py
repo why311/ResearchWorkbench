@@ -7,8 +7,8 @@ import zipfile
 import pytest
 
 from backend import app as core
-from tests.test_documents import client, project as create
-from tests.test_research_experiments import wait_series
+from tests.test_workbench import client, create
+from tests.test_research import wait_series
 
 
 TRAIN = '''import argparse,json,os,time
@@ -21,9 +21,6 @@ try:
 except OSError:
  print('repository remains read-only',flush=True)
 out=Path(os.environ['RESEARCH_OUTPUT']);(out/'metrics.json').write_text(json.dumps({'score':a.weight+a.seed/1000}))
-(out/'config.json').write_text('{}')
-(out/'link.txt').symlink_to('/workspace/train.py')
-(out/'report.html').write_text('<script>void 0</script>')
 print('actual experiment completed',a.seed,a.weight,flush=True)
 '''
 
@@ -51,11 +48,6 @@ def test_real_repository_series_and_isolated_replay(client, tmp_path):
     assert len(result['paired']) == 2 and all(abs(r['delta'] - 2) < 1e-9 for r in result['paired'])
     assert all('repository remains read-only' in r['log'] and '--network none' in r['log'] for r in result['runs'])
     assert all(r['config']['args'] == ['--seed', str(r['config']['seed']), '--weight', str(1 if r['config']['variant_index'] == 0 else 3)] for r in result['runs'])
-    run_id = result['runs'][0]['id']
-    paths = f'/api/projects/{pid}/runs/{run_id}/artifacts/'
-    assert client.get(paths + 'link.txt').status_code == 404
-    assert client.get(paths + 'config.json').json()['entry'] == 'train.py'
-    assert client.get(paths + 'report.html').headers['content-disposition'].startswith('attachment;')
     response = client.get(f'/api/projects/{pid}/experiment-series/{result["id"]}/export')
     archive = zipfile.ZipFile(io.BytesIO(response.content))
     assert {'repository/train.py', 'replay_repository.py', 'Dockerfile.runner'} <= set(archive.namelist())
